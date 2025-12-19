@@ -1,86 +1,98 @@
-import sys
+import os
 import requests
-import pandas as pd
-from datetime import date
-from pprint import pprint
+import re
 
-def get_available_download_symbols(exchange: str, target_date: date) -> list[str]:
+# Load API key using your provided logic
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+API_KEY = os.environ.get("TARDIS_API_KEY")
+if not API_KEY:
+    raise RuntimeError("Missing TARDIS_API_KEY in .env file.")
+
+headers = {"Authorization": f"Bearer {API_KEY}"}
+
+def parse_metadata(symbol):
     """
-    Lekérdezi és visszaadja a megadott tőzsdén a cél dátumán elérhető szimbólumok listáját.
+    Parses Strike, Expiry, and Option Type from standard exchange symbols.
     """
-    api_url = f"https://api.tardis.dev/v1/exchanges/{exchange}"
-    try:
-        response = requests.get(api_url)
-        response.raise_for_status()  # Hiba dobása, ha a HTTP kérés sikertelen (pl. 404, 500)
-        info = response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Hiba történt az API hívás során: {e}", file=sys.stderr)
-        return []
-
-    if not info or 'availableSymbols' not in info:
-        print(f"Hiba: Az API válasz nem tartalmazza az 'availableSymbols' kulcsot.", file=sys.stderr)
-        return []
-
-    availableSymbols = pd.DataFrame(info['availableSymbols'])
+    # Try to find common patterns: e.g., 27DEC24 or 241227, followed by strike, followed by C/P
+    # Standard format: BTC-27DEC24-60000-C or BTC-241227-60000-P
+    match = re.search(r'[-_]([0-9A-Z]{6,7})[-_]([0-9\.]+)[-_](C|P|CALL|PUT)$', symbol, re.IGNORECASE)
     
-    # Időzóna-tudatos (UTC) Timestamp objektumok létrehozása a szűréshez
-    fr = pd.Timestamp(target_date, tz='UTC')
-    to = fr + pd.Timedelta(days=1)
+    if match:
+        return {
+            "expiry": match.group(1),
+            "strike": match.group(2),
+            "type": "Call" if match.group(3).upper().startswith('C') else "Put"
+        }
     
-    availableSymbols['availableSince_ts'] = pd.to_datetime(
-        availableSymbols['availableSince'], utc=True
-    )
-    availableSymbols['availableTo_ts'] = pd.to_datetime(
-        availableSymbols['availableTo'], utc=True
-    )
+    # Fallback for BitMEX style or others: .BXXX or similar
+    if ".B" in symbol or "-C" in symbol or "-P" in symbol:
+         return {"expiry": "See Symbol", "strike": "See Symbol", "type": "Option"}
+         
+    return {"expiry": None, "strike": None, "type": "Unknown"}
 
-    # Szűrés a cél dátumára aktív szimbólumokra.
-    # A hiányzó 'availableTo' (NaT) végtelen érvényességet jelent.
-    is_active_on_target_date = (
-        (fr >= availableSymbols.availableSince_ts) & 
-        (
-            (to <= availableSymbols.availableTo_ts) |
-            availableSymbols.availableTo_ts.isna()
-        )
-    )
-
-    currdf = availableSymbols.loc[is_active_on_target_date]
+def get_options_data():
+    # 1. Get all exchanges
+    print("Fetching list of exchanges...")
+    exchanges_url = "https://api.tardis.dev/v1/exchanges"
+    exchanges = requests.get(exchanges_url).json()
     
-    return currdf['id'].to_list()
+    all_options = []
 
-
-def list_tardis_csv(exchange: str, channel: str, target_date: date) -> list[str]:
-    """
-    A megadott tőzsde, csatorna és nap letölthető fájljainak teljes URL-jeit generálja.
-    """
-    symbols = get_available_download_symbols(exchange, target_date)
-    
-    print(f"\nTalált szimbólumok {exchange} / {channel} / {target_date} napra: {len(symbols)} db.")
-    
-    if not symbols:
-        return []
+    for exchange in exchanges:
+        ex_id = exchange['id']
+        print(f"Checking {ex_id} for options...")
         
-    date_str = pd.Timestamp(target_date).strftime('%Y/%m/%d')
-    base_url = f"https://datasets.tardis.dev/v1/{exchange}/{channel}/{date_str}/"
-    
-    # URL-ek generálása list comprehension segítségével
-    url_list = [f"{base_url}{symbol}.csv.gz" for symbol in symbols]
+        url = f"https://api.tardis.dev/v1/exchanges/{ex_id}"
+        resp = requests.get(url, headers=headers)
         
-    return url_list
+        if resp.status_code == 200:
+            data = resp.json()
+            symbols_list = data.get('availableSymbols', [])
+            
+            for s in symbols_list:
+                # FIX: Handle if symbol is a dictionary (BitMEX) or a string (Deribit)
+                symbol_id = s['id'] if isinstance(s, dict) else s
+                
+                # Check if it's an option by naming convention
+                upper_sym = symbol_id.upper()
+                if any(suffix in upper_sym for suffix in ["-C", "-P", "CALL", "PUT"]) or ".B" in upper_sym:
+                    all_options.append({
+                        "exchange": ex_id,
+                        "id": symbol_id,
+                        "metadata": parse_metadata(symbol_id)
+                    })
+        else:
+            print(f"  - Error {resp.status_code} on {ex_id}")
 
-# --- Fő program futtatása ---
+    return all_options
 
 if __name__ == "__main__":
-    EXCHANGE = "binance-european-options"
-    CHANNEL = "trade"
-    TARGET_DATE = date(2025, 5, 1)
+    options_list = get_options_data()
     
-    print(f"Keresés: {EXCHANGE}, Adattípus: {CHANNEL}, Dátum: {TARGET_DATE}")
+    print(f"\n--- SUCCESS: Found {len(options_list)} Options ---")
+    
+    # Print header
+    print(f"{'EXCHANGE':<18} | {'OPTION ID':<35} | {'TYPE'}")
+    print("-" * 70)
+    
+    # Print first 20 results
+    for item in options_list[:20]:
+        print(f"{item['exchange']:<18} | {item['id']:<35} | {item['metadata']['type']}")
 
-    files = list_tardis_csv(EXCHANGE, CHANNEL, TARGET_DATE)
+    # Save results to JSON
+    import json
+    with open("available_options.json", "w") as f:
+        json.dump(options_list, f, indent=2)
+    print(f"\nFull list of {len(options_list)} options saved to 'available_options.json'")
+
+    for item in options_list:
+        if item['metadata']['expiry'] == 'See Symbol' or item['metadata']['strike'] == 'See Symbol':
+            with open("options_needing_manual_check.txt", "a") as f:
+                f.write(f"{item['exchange']} | {item['id']}\n")
     
-    if files:
-        print(f"\n--- Letölthető URL-ek (összesen: {len(files)}) ---")
-        pprint(files)
-    else:
-        print("\nNem található letölthető fájl a megadott feltételekkel.")

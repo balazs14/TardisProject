@@ -1,3 +1,4 @@
+import os
 import re
 from pprint import pprint
 import requests
@@ -6,6 +7,13 @@ from datetime import date
 import pandas as pd
 import lib.pandas_utils as pu
 from bs4 import BeautifulSoup
+
+# Load API key from environment or .env (if python-dotenv is installed)
+try:
+    from dotenv import load_dotenv  # optional dependency
+    load_dotenv()
+except Exception:
+    pass
 
 from tardis_client import TardisClient, Channel
 from tardis_dev import datasets
@@ -124,7 +132,7 @@ def example_download_of_a_dataset():
         from_date="2025-05-01",
         to_date="2025-05-01",
         symbols=['OPTIONS','FUTURES'],
-        api_key="YOUR API KEY (optionally)",
+        api_key=os.environ.get("TARDIS_API_KEY"),
     )
 
 
