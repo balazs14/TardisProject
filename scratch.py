@@ -5,6 +5,8 @@ import asyncio
 from datetime import date
 import pandas as pd
 import lib.pandas_utils as pu
+import lib.utils as utils
+
 from bs4 import BeautifulSoup
 
 from tardis_client import TardisClient, Channel

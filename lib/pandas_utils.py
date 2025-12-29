@@ -1,4 +1,4 @@
-from . import get_my_logger
+from TardisProject import get_my_logger
 logger = get_my_logger(__name__)
 
 import pandas as pd

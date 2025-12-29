@@ -1,7 +1,83 @@
 {
-	"folders": [
-		{
-			"path": ".."
-		}
-	]
+  "folders": [
+    {
+      "name": "TardisProject",
+      "path": ".."
+    }
+  ],
+  "settings": {
+    // ---------- Python ----------
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.terminal.activateEnvironment": true,
+    // Formatting & linting
+    "editor.formatOnSave": true,
+    "python.formatting.provider": "black",
+    "python.linting.enabled": true,
+    "python.linting.flake8Enabled": true,
+    // Jupyter
+    "jupyter.askForKernelRestart": false,
+    "jupyter.notebookFileRoot": "${workspaceFolder}",
+    // ---------- Editor ----------
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "editor.rulers": [88],
+    "editor.tabSize": 4,
+    "editor.detectIndentation": false,
+    // ---------- Search ----------
+    "search.exclude": {
+      "**/.venv/**": true,
+      "**/__pycache__/**": true,
+      "**/.pytest_cache/**": true,
+      "**/.mypy_cache/**": true,
+      "**/.git/**": true,
+      "**/data/raw/**": true
+    },
+    // ---------- Git ----------
+    "git.autofetch": true,
+    "git.confirmSync": false,
+    "jupyter.interactiveWindow.creationMode": "perFile"
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "ms-toolsai.jupyter",
+      "ms-toolsai.jupyter-renderers",
+      "tamasfe.even-better-toml",
+      "redhat.vscode-yaml",
+      "esbenp.prettier-vscode"
+    ]
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "Run tests (pytest)",
+        "type": "shell",
+        "command": "pytest -q",
+        "group": {
+          "kind": "test",
+          "isDefault": true
+        }
+      },
+      {
+        "label": "Format with black",
+        "type": "shell",
+        "command": "black ."
+      }
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Python: Current File",
+        "type": "python",
+        "request": "launch",
+        "program": "${file}",
+        "console": "integratedTerminal",
+        "justMyCode": true
+      }
+    ]
+  }
 }
