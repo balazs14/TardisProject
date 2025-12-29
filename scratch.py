@@ -4,8 +4,8 @@ import requests
 import asyncio
 from datetime import date
 import pandas as pd
-import lib.pandas_utils as pu
-import lib.utils as utils
+from TardisProject.lib import pandas_utils as pu
+from TardisProject.lib import utils
 
 from bs4 import BeautifulSoup
 
