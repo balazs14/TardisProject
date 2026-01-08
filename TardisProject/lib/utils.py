@@ -1,32 +1,36 @@
-from .. import get_my_logger
-logger = get_my_logger(__name__)
-
+from . import get_pybt_logger
+logger = get_pybt_logger(__name__)
 import asyncio
 import functools
 import inspect
 import os
+from .my_concurrent import futures as mcf
 import contextlib
 import pymysql
 import pandas as pd
 import numpy as np
 import pickle
-from .my_concurrent import futures as mfc
-from collections.abc import Sequence
 
 class ParameterError(Exception):
     pass
 class InterruptError(Exception):
     pass
 
-local_bucket = None
-s3_bucket = None
+local_bucket = '/lakehillenv/backtester/pybacktester/data/test'
+s3_bucket = 's3://to-be-determined/test'
+
+epsilon_size = 0.001        
+epsilon_vol = 0.001
+
+
 
 def set_layer(layer='test'):
     global local_bucket
     global s3_bucket
     logger.info(f'setting layer to "{layer}"')
-    local_bucket = '/my/data/to-be-determined/' + layer
+    local_bucket = '/lakehillenv/backtester/pybacktester/data/' + layer
     s3_bucket = 's3://to-be-determined/' + layer
+
 
 def interruptible():
     def wrapper(func):
@@ -54,6 +58,7 @@ def interruptible():
 
         return wrapped
     return wrapper
+
 
 def wrap_in_sync(afn):
     def wrapped(*args, **kwargs):
@@ -94,12 +99,34 @@ def partialize_fnstring(fnstring, fndict):
         return fn(mktstate, runledger, *args, **params)
     return partialized 
 
-def connection_context(target_database='default', **kwargs):
-    if target_database == 'default':
-        dbhost='to-be-determined'
+def connection_context(target_database='dev', **kwargs):
+    if target_database == 'dev':
+        dbhost='lakehill-dev-cluster.cluster-cjjeheodr7as.us-east-2.rds.amazonaws.com'
         dbport=3306
-        dbuser='user'
-        dbpassword='password'
+        dbuser='optimizer'
+        dbpassword='optimizer123'
+    elif target_database == 'stg':
+        dbhost='lakehill-staging-cluster.cluster-cjjeheodr7as.us-east-2.rds.amazonaws.com'
+        dbport=3306
+        dbuser='optimizer'
+        dbpassword='optimizer123'
+    elif target_database == 'stg-balazs':
+        dbhost='lakehill-staging-cluster.cluster-cjjeheodr7as.us-east-2.rds.amazonaws.com'
+        dbport=3306
+        dbuser='balazs'
+        dbpassword='%uba76HWTeM3'
+        dbpassword='e^$Pic%e45h@'
+        dbpassword='5*pft@Wq3pnK@&'
+    elif target_database == 'prod':
+        dbhost='lakehill-prod-cluster.cluster-cjjeheodr7as.us-east-2.rds.amazonaws.com'
+        dbport=3306
+        dbuser='pipeline_optimizer'
+        dbpassword='D1lhcm2014$$'
+    elif target_database == 'prod-balazs':
+        dbhost='lakehill-prod-cluster.cluster-cjjeheodr7as.us-east-2.rds.amazonaws.com'
+        dbport=3306
+        dbuser='balazs'
+        dbpassword='5*pft@Wq3pnK@&'
     else:
         raise NotImplementedError
     return contextlib.closing(pymysql.connect(host=dbhost, port=dbport, user=dbuser,
@@ -110,6 +137,7 @@ def dbquery(sql, target):
         df = pd.read_sql_query(sql, conn)
     return df
 
+
 def sql_list(series, numeric=False):
     series = pd.Series(series)
     if numeric:
@@ -118,14 +146,15 @@ def sql_list(series, numeric=False):
         ls = [f"'{s}'" for s in series.to_list()]
     return ','.join(ls)
 
+
 def prev_date(day, days, steps=1):
     ser = pd.DataFrame(index=days, data=days)
     shifted = ser.shift(steps).reindex(index=[day], method='bfill').iloc[0,0]
     return shifted
 
+from collections.abc import Sequence
 def is_array_like(var):
     return isinstance(var, (Sequence, np.ndarray,pd.Series)) and not isinstance(var, str)
-
 def ensure_array_like(var):
     if is_array_like(var):
         return var
@@ -222,6 +251,7 @@ class Persistable():
         df.to_csv(path)
         return
 
+
 # timing
 import time
 from contextlib import contextmanager
@@ -254,7 +284,7 @@ tracemalloc.start()
 def log_process_memory():
     res = ""
     mem = process.memory_info().rss / 1024**2
-    res = res + f"[MEMORY] Memory usage: {mem:.0f} MB\n"
+    res = res + f"[MEMORY] Memory usage: {mem:.0f} MB"
 
     # snapshot = tracemalloc.take_snapshot()
     # top_stats = snapshot.statistics("lineno")
@@ -273,3 +303,35 @@ def log_df_memory(df, name):
 def log_object_memory(df, name):
     return f'[MEMORY] obj {name}: {compute_object_memory_mb(df):.0f} MB'
 
+# caching of function output
+def cached_member(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        path = func(*args, _provide_cache_path=True, **kwargs)
+
+        if path is None:
+            result = func(*args, **kwargs)
+            return result
+        
+        # If the file exists, load cache
+        if os.path.exists(path) and not recreate:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+
+        # Otherwise compute and cache
+        result = func(*args, **kwargs)
+        
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump(result, f)
+
+        return result
+
+    return wrapper
+
+# engineering display in f-strings
+def engf(x: float, decimals: int = 3) -> str:
+    for unit in ["", "k", "M", "G", "T"]:
+        if abs(x) < 1000:
+            return f"{x:.{decimals}f}{unit}"
+        x /= 1000

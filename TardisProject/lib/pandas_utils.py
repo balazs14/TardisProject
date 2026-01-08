@@ -1,10 +1,110 @@
-from .. import get_my_logger
-logger = get_my_logger(__name__)
-
 import pandas as pd
 import numpy as np
 from pandas.core.base import PandasObject
 from . import utils
+
+# def cleanup_index_columns(df):
+#     '''remove columns that are named the same as index levels'''
+#     index_levels = set([level for level in df.index.names if level is not None])
+#     if isinstance (df, pd.Series):
+#         columns = set([df.name]) if df.name is not None else set([])
+#     elif isinstance(df, pd.DataFrame):
+#         columns = set(df.columns)
+#     extra_columns = set.intersection(index_levels, columns)
+#     if not extra_columns:
+#         return df
+#     else:
+#         if isinstance (df, pd.Series):
+#             return df
+#         else:
+#             if 'index' in df.columns:
+#                 extra_columns = list(extra_columns) + ['index']
+#             return df.drop(extra_columns, axis=1)
+
+# def complete_index_columns(df):
+#     if set(df.index.names).issubset(set(df.columns)):
+#         return df
+#     if isinstance(df.index, pd.MultiIndex):
+#         lev = df.index.levels[-1].name
+#         if lev in df.columns:
+#             return complete_index_columns(df.reset_index(lev, drop=True))
+#         else:
+#             return complete_index_columns(df.reset_index(lev, drop=False))
+#     else:
+#         # just a simple index
+#         lev = df.index.name
+#         if lev in df.columns:
+#             return df.reset_index(drop=True)
+#         elif lev : # not empty
+#             return df.reset_index(drop=False)
+#         else:
+#             return df.reset_index(drop=True)
+        
+# def reindex(df_in, levels=[], sort_index=False, copy=False, keep_columns=False):
+#     if keep_columns:
+#         return reindex_keep_columns(df_in, levels=levels, sort_index=sort_index, copy=copy)
+#     if copy:
+#         df = df_in.copy()
+#     else:
+#         df = df_in
+#     df = cleanup_index_columns(df)
+#     if not levels:
+#         return df.reset_index()
+#     else:
+#         df = df.reset_index(allow_duplicates=True).set_index(levels)
+#         if sort_index:
+#             return df.sort_index()
+#         else:
+#             return df
+
+# def reindex_keep_columns(df_in, levels=[], sort_index=False, copy=False):
+#     if copy:
+#         df =  df_in.copy()
+#     else:
+#         df = df_in 
+
+#     if not isinstance(levels, (list,tuple)):
+#         levels = [levels]
+        
+#     df = complete_index_columns(df)
+    
+#     # shortcut for performance
+#     if df.index.names != levels:
+#         # we make sure index is also available as a column
+#         if len(levels) == 0:
+#             if sort_index:
+#                 return df.reset_index(drop=True).sort_index()
+#             else:
+#                 return df.reset_index(drop=True)
+
+#         if len(levels) == 1:
+#             df.index = pd.MultiIndex.from_frame(df[levels])
+#             if levels[0] in df.columns:
+#                 df = df.reset_index(drop=True)
+#             df.index = df[levels[0]]
+
+#         if len(levels) > 1:        
+#             df.index = pd.MultiIndex.from_frame(df[levels])
+#     else:
+#         if len(levels) == 1 and isinstance(df.index, pd.MultiIndex):
+#             df.index = pd.Index(df.index.to_frame()[levels[0]])
+
+        
+#     if sort_index:
+#         return df.sort_index()
+#     else:
+#         return df
+
+# def merge_assign(dfa, dfb, levels, col, fillna, how='outer'):
+#     left = reindex(dfa)
+#     if col in left:
+#         left.drop(columns=[col], inplace=True)
+#     right = reindex(dfb)[levels + [col]]
+#     res = left.merge(right, on=levels, how=how)
+#     res[col].fillna(fillna, inplace=True)
+#     return reindex(res, levels)
+
+
 
 def stringify_index(index):
     def _stringify(tup):
@@ -72,6 +172,50 @@ def timestampize(df, col=None):
         df[col] = pd.to_datetime(df[col])
     return df
 PandasObject.timestampize = timestampize
+
+# def join_update_old(df1, ser, on):
+#     column = ser.name
+#     df = df1.drop(columns=[column], errors='ignore')
+#     df = df.join(ser, on=on)
+#     return df 
+#     # df = join_update(df, multiplier_inferred.rename('multiplier'),  on=['ref_symbol','sectype']).set_index('symbol').multiplier
+
+
+def join_update(df1, ser, on=None):
+    # copies df...
+    column = ser.name
+    df = df1.drop(columns=[column], errors='ignore')
+    if isinstance(ser.index, pd.MultiIndex):
+        if on is None:
+            on = ser.index.names
+        elif on!=ser.index.names :
+            ser.index.names = on
+    else:
+        if on is None:
+            on = ser.index.name
+        elif on!=ser.index.name :
+            ser.index.name = on
+    try:
+        # deal with the case where there is a column named the same as the index
+        cols_to_rename = {col:f'{col}_tmp' for col in df.columns if col in df.index.names}
+        cols_to_rename_back = {f'{col}_tmp':col for col in df.columns if col in df.index.names}
+        df = df.rename(columns=cols_to_rename)
+        df = df.join(ser, on=on)
+        df = df.rename(columns=cols_to_rename_back)
+    except:
+        # if we have a multiindex on ser, we need to get rid of the degenerate indices
+
+        import pdb; pdb.set_trace()
+        if isinstance(ser.index, pd.MultiIndex):
+            assert (on in ser.index.names)
+        else:
+            assert (on == ser.index.name) 
+        ser = ser.reset_index().set_index(on)[column]
+        df = df.join(ser, on=on)
+    
+    return df 
+
+PandasObject.join_update = join_update
 
 def map_update(df, src_df, on=None, col=None, target_col=None, prefill=None):
     ''' 
@@ -199,7 +343,8 @@ def map_update(df, src_df, on=None, col=None, target_col=None, prefill=None):
     df.drop(columns=['tmp_on'], errors='ignore', inplace=True)
     # when src_df is a slice we might trigger a copy here. I am
     # leaving this in -- the user should make sure that src is not a slice
-    src_df.drop(columns=['tmp_on','tmp_present'], errors='ignore', inplace=True)
+    # -- after all I remove it, too annoying. 
+    #src_df.drop(columns=['tmp_on','tmp_present'], errors='ignore', inplace=True)
     return df # works inplace, this is just for convenience
     
 PandasObject.map_update = map_update
@@ -275,7 +420,7 @@ def display_context(kind=None):
         pd.set_eng_float_format(accuracy=3, use_eng_prefix=True)    
         with pd.option_context('display.max_columns',None,
                                'display.width',200,
-                               'display.max_rows',50,
+                               'display.max_rows',500,
                                'display.max_colwidth',30):
             yield
         pd.set_option('display.float_format',None)
