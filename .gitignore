@@ -3,3 +3,6 @@
 *~
 *.pyc
 datasets
+.env
+.env.*
+!.env.example
