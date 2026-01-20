@@ -328,8 +328,7 @@ def download_single_csv(ex, dt, fr, to, sym):
             from_date=fr,
             to_date=to,
             symbols=[sym],
-            #api_key=os.environ.get('TARDIS_API_KEY', None)
-            api_key=os.environ.get('TD.qL-Zzmk3z6IQfxW4.OQKJd-YucJo2nAu.l4lrXPsUzs45JP6.wv7ngt7Ou-gBXJu.TWRWGtiZGHYBtff.EIbB', None)
+            api_key=os.environ.get('TARDIS_API_KEY', None)
         )
     else:
         logger.debug(f'CSV already here {csv_fname}')
