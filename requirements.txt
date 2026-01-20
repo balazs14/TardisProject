@@ -64,3 +64,4 @@ tzdata==2025.3
 urllib3==2.6.2
 wcwidth==0.2.14
 yarl==1.22.0
+python-dotenv==1.0.1
