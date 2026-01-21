@@ -9,6 +9,7 @@ import pyarrow.parquet as pq
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from tardis_dev import datasets
+import glob
 
 # 1. Initialize Environment
 load_dotenv()
@@ -77,8 +78,8 @@ def convert_to_parquet(csv_files, pq_fname):
 def run_deribit_attack(date_str='2025-12-05', freq='1min'):
     target_dt = pd.to_datetime(date_str).tz_localize(None)
     # 10-minute warm-up buffer prevents nulls at the 00:00 start
-    start_time_str = (target_dt - timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
-
+    start_time_str = (target_dt - timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
+    end_date_str = (target_dt + timedelta(days=1)).strftime('%Y-%m-%d')
     with open("deribit_pcp_targets.json", "r") as f:
         targets = json.load(f)
 
@@ -97,18 +98,14 @@ def run_deribit_attack(date_str='2025-12-05', freq='1min'):
         return
 
     # C. Acquisition - Use Bulk Keywords for efficiency
-    pq_path = f"{DATADIR}/deribit_{date_str}_combined.parquet"
+    pq_path = f"{DATADIR}/deribit_{date_str}_combined.parquet"    
     if not os.path.exists(pq_path):
         logger.info(f"Downloading market data with warm-up buffer...")
-        # Separate downloads for quotes (Options) and derivative_ticker (Futures)
-        datasets.download(exchange="deribit", data_types=["quotes"], from_date=start_time_str, 
-                          to_date=date_str, symbols=["OPTIONS"], download_dir=DATADIR, api_key=API_KEY)
-        datasets.download(exchange="deribit", data_types=["derivative_ticker"], from_date=start_time_str, 
-                          to_date=date_str, symbols=["FUTURES"], download_dir=DATADIR, api_key=API_KEY)
-        
-        opt_csv = f"{DATADIR}/deribit_quotes_{date_str}_OPTIONS.csv.gz"
-        fut_csv = f"{DATADIR}/deribit_derivative_ticker_{date_str}_FUTURES.csv.gz"
-        convert_to_parquet([opt_csv, fut_csv], pq_path)
+        datasets.download(exchange="deribit", data_types=["quotes"], 
+                          from_date=start_time_str, to_date=end_date_str, 
+                          symbols=["OPTIONS", "FUTURES"], download_dir=DATADIR, api_key=API_KEY)        
+        all_csvs = glob.glob(f"{DATADIR}/deribit_quotes_*.csv.gz")
+        convert_to_parquet(all_csvs, pq_path)
 
     # D. Resampling logic
     raw_df = pd.read_parquet(pq_path)
