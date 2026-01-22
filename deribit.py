@@ -39,14 +39,9 @@ def get_deribit_availability():
     return availability
 
 def convert_to_parquet(csv_files, pq_fname):
-    """
-    Unified conversion that maps 'best_ask_price' to 'ask_price'.
-    This ensures Futures and Options data align on the same schema.
-    """
     writer = None
     final_cols = ['ts', 'symbol', 'ask_price', 'bid_price', 'local_timestamp']
-    # Tardis derivative_ticker uses 'best_' prefix for top-of-book
-    potential_prices = ['ask_price', 'bid_price', 'best_ask_price', 'best_bid_price']
+    potential_prices = ['ask_price', 'bid_price', 'best_ask_price', 'best_bid_price', 'mark_price', 'last_price']
 
     for csv_file in csv_files:
         if not os.path.exists(csv_file): continue
@@ -56,14 +51,24 @@ def convert_to_parquet(csv_files, pq_fname):
                                usecols=lambda c: c in ['symbol', 'local_timestamp', 'timestamp'] or c in potential_prices)
         
         for chunk in csv_iter:
-            # Normalize column names across different Tardis datasets
+            # Alapértelmezett átnevezések (ha vannak)
             chunk = chunk.rename(columns={'best_ask_price': 'ask_price', 'best_bid_price': 'bid_price'})
+            
+            # 2. LOGIKA A HATÁRIDŐS ÁRAKHOZ: 
+            # Ha nincs ask_price (mert Futures), használjuk a mark_price-t vagy last_price-t
+            if 'ask_price' not in chunk.columns or chunk['ask_price'].isnull().all():
+                if 'mark_price' in chunk.columns:
+                    chunk['ask_price'] = chunk['mark_price']
+                    chunk['bid_price'] = chunk['mark_price']
+                elif 'last_price' in chunk.columns:
+                    chunk['ask_price'] = chunk['last_price']
+                    chunk['bid_price'] = chunk['last_price']
+
             if 'local_timestamp' not in chunk.columns and 'timestamp' in chunk.columns:
                 chunk['local_timestamp'] = chunk['timestamp']
             
             chunk['ts'] = pd.to_datetime(chunk['local_timestamp'], unit='us')
             
-            # Ensure Parquet schema is identical for every row/chunk
             for col in final_cols:
                 if col not in chunk.columns: chunk[col] = np.nan
             
@@ -100,11 +105,20 @@ def run_deribit_attack(date_str='2025-12-05', freq='1min'):
     # C. Acquisition - Use Bulk Keywords for efficiency
     pq_path = f"{DATADIR}/deribit_{date_str}_combined.parquet"    
     if not os.path.exists(pq_path):
-        logger.info(f"Downloading market data with warm-up buffer...")
+        logger.info(f"Downloading market data...")
+        
+        # Opciók: marad a 'quotes' (itt a Deribit ask_price/bid_price formátumot ad)
         datasets.download(exchange="deribit", data_types=["quotes"], 
                           from_date=start_time_str, to_date=end_date_str, 
-                          symbols=["OPTIONS", "FUTURES"], download_dir=DATADIR, api_key=API_KEY)        
-        all_csvs = glob.glob(f"{DATADIR}/deribit_quotes_*.csv.gz")
+                          symbols=["OPTIONS"], download_dir=DATADIR, api_key=API_KEY)
+        
+        # Határidős ügyletek: 'derivative_ticker' (itt best_ask_price/best_bid_price van)
+        datasets.download(exchange="deribit", data_types=["derivative_ticker"], 
+                          from_date=start_time_str, to_date=end_date_str, 
+                          symbols=["FUTURES"], download_dir=DATADIR, api_key=API_KEY)        
+        
+        # FONTOS: A glob-nak mindkét fájltípust meg kell találnia!
+        all_csvs = glob.glob(f"{DATADIR}/deribit_*.csv.gz")
         convert_to_parquet(all_csvs, pq_path)
 
     # D. Resampling logic
@@ -113,12 +127,30 @@ def run_deribit_attack(date_str='2025-12-05', freq='1min'):
     symbol_data = {}
     grouped = raw_df.groupby('symbol')
     
+    raw_df = pd.read_parquet(pq_path)
+    logger.info(f"--- DIAGNOSTICS ---")
+    logger.info(f"Total rows in Parquet: {len(raw_df)}")
+    logger.info(f"Unique symbols found in data: {raw_df['symbol'].unique()}")
+
+    grid = pd.date_range(target_dt, target_dt + pd.Timedelta(days=1), freq=freq, inclusive='left')
+    symbol_data = {}
+    grouped = raw_df.groupby('symbol')
+    
     for sym in needed_symbols:
-        # Standardize matching: some exchanges use different casing/suffixes
         if sym in grouped.groups:
-            df_s = grouped.get_group(sym).drop_duplicates('ts', keep='last').set_index('ts')
-            # Forward-fill ensures we use the latest quote on the synchronized grid
+            df_s = grouped.get_group(sym).sort_values('ts').drop_duplicates('ts', keep='last').set_index('ts')
+            
+            # CHECK: Does the future actually have price data?
+            non_null_asks = df_s['ask_price'].count()
+            logger.info(f"Symbol {sym}: {len(df_s)} raw rows, {non_null_asks} non-null ask prices.")
+            
+            if non_null_asks == 0:
+                logger.warning(f"!!! Symbol {sym} has ZERO price data. Check CSV column names.")
+
             symbol_data[sym] = df_s[['ask_price', 'bid_price']].reindex(grid, method='ffill')
+        else:
+            logger.error(f"!!! Symbol {sym} NOT FOUND in grouped data. Mismatch in target JSON?")
+
 
     # E. Calculate Violations
     final_chunks = []
