@@ -1,6 +1,6 @@
 import logging
-#import warnings
-#warnings.simplefilter('error')
+import warnings
+warnings.simplefilter('ignore')
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -60,9 +60,9 @@ def pcp_breaking(opt_df):
 def mark_up_with_futures(resampled_df):
     ref_sym = 'BTC-USD'
 
-    fut_df = resampled_df.stack('symbol').loc[lambda x: (x.ref_sym == ref_sym)&(x.pc.isin(['F']))].reset_index()
+    fut_df = resampled_df.stack('symbol', future_stack=True).loc[lambda x: (x.ref_sym == ref_sym)&(x.pc.isin(['F']))].reset_index()
     fut_df = fut_df.rename(columns={'ask_amount':'fut_ask_amount', 'ask_price':'fut_ask_price', 'bid_amount':'fut_bid_amount', 'bid_price':'fut_bid_price', 'exp':'fut_exp'})
-    opt_df = resampled_df.stack('symbol').loc[lambda x: (x.ref_sym == ref_sym)&(x.pc.isin(['C','P']))].reset_index()
+    opt_df = resampled_df.stack('symbol', future_stack=True).loc[lambda x: (x.ref_sym == ref_sym)&(x.pc.isin(['C','P']))].reset_index()
     opt_df= opt_df.map_update(fut_df, on=['ts','fut_sym'], col=['fut_ask_amount', 'fut_ask_price', 'fut_bid_amount', 'fut_bid_price', 'fut_exp'])
     return opt_df, fut_df
 
@@ -70,6 +70,7 @@ def mark_up_with_futures(resampled_df):
 def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_tag='resampled'):
     # OPTIMIZATION: Increased chunksize as Parquet reading is more efficient.
     chunksize = 500_000
+    chunksize = 50_000
     df_iters, dayinfo = iter_datasets(fr, chunksize=chunksize)
 
     iter_keys = list(df_iters.keys())
@@ -156,7 +157,7 @@ def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_ta
             dummy_ts = t_start - pd.Timedelta(nanoseconds=1)
             dummy_df = pd.DataFrame([last_val.values], index=[dummy_ts], columns=cols_to_save)
 
-            if df is not None:
+            if df is not None and len(dummy_df.dropna()) > 0:
                 df_dedup = df.drop_duplicates(subset=['ts'], keep='last').set_index('ts')[cols_to_save]
                 combined_sym = pd.concat([dummy_df, df_dedup]).sort_index()
             else:
@@ -258,13 +259,17 @@ def augment_quotes(df):
             if col not in df: df[col] = np.nan
         return df
 
-    df['fut_sym'] = df[['_A', '_B', 'exp_str']].agg('-'.join, axis=1)
+    # The correspondence for pcp is between the BTCUSD options and the BTCUSDT (usdt margined)
+    # futures. fut_sym needs to be adjusted
+    df['_BT'] = np.where((df['_B']=='USD')&(df['pc']!='F'), 'USDT', df['_B'])
+    df['fut_sym'] = df[['_A', '_BT', 'exp_str']].agg('-'.join, axis=1)
+
     df['ref_sym'] = df[['_A', '_B']].agg('-'.join, axis=1)
     df['exp'] = pd.to_datetime(df['exp_str'], format='%y%m%d')
     df['ts'] = pd.to_datetime(df['local_timestamp'], unit='us')
 
     # Drop intermediate columns to save memory
-    df.drop(columns=['_A', '_B', 'exp_str','strike_str'], inplace=True, errors='ignore')
+    df.drop(columns=['_A', '_B', '_BT', 'exp_str','strike_str'], inplace=True, errors='ignore')
 
     return df
 

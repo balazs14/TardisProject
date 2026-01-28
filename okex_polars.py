@@ -6,6 +6,9 @@ logger = logging.getLogger(__name__)
 
 import re
 import os
+import sys
+from pathlib import Path
+
 from pprint import pprint
 import requests
 import itertools
@@ -13,9 +16,11 @@ import polars as pl
 import pandas as pd
 import numpy as np
 import pickle
-from datetime import date
+from datetime import datetime, timedelta
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.csv as pv
+
 
 from dataclasses import dataclass, field
 from typing import List, Dict
@@ -28,6 +33,9 @@ from tardis_dev import datasets
 
 datadir = 'okex'
 
+# Use microsecond resolution for all timestamps
+TIMESTAMP_UNIT = 'us'
+
 
 def align_calls_puts(opt_df):
     # Separate calls and puts
@@ -35,12 +43,13 @@ def align_calls_puts(opt_df):
     puts = opt_df.filter(pl.col('pc') == 'P').clone()
 
     # Rename option specific columns
-    rename_cols = ['ask_amount', 'ask_price', 'bid_amount', 'bid_price', 'symbol']
+    rename_cols = ['ask_amount', 'ask_price', 'bid_amount', 'bid_price', 'symbol', 'stale']
     calls = calls.rename({c: f'call_{c}' for c in rename_cols})
     puts = puts.rename({c: f'put_{c}' for c in rename_cols})
 
     # Drop shared columns from puts to avoid duplication
-    shared_fut_cols = ['fut_ask_amount', 'fut_ask_price', 'fut_bid_amount', 'fut_bid_price', 'fut_exp']
+    shared_fut_cols = ['fut_ask_amount', 'fut_ask_price', 'fut_bid_amount', 'fut_bid_price', 'fut_exp', 'fut_stale',
+                       'spot_ask_amount', 'spot_ask_price', 'spot_bid_amount', 'spot_bid_price', 'spot_stale']
     calls = calls.drop('pc')
     puts = puts.drop(['pc'] + shared_fut_cols, strict=False)
 
@@ -48,63 +57,120 @@ def align_calls_puts(opt_df):
     on_keys = ['ts', 'ref_sym', 'fut_sym', 'exp', 'strike']
     return calls.join(puts, on=on_keys, how='inner')
 
-
 def pcp_breaking(opt_df):
     # c - p = f - k, pcpb = c-p-f+k
     df = opt_df.filter(pl.col('fut_exp').is_not_null())
     df = align_calls_puts(df)
+    fut_ask_price = pl.col('fut_ask_price')
+    fut_bid_price = pl.col('fut_bid_price')
+    spot_ask_price = pl.col('spot_ask_price')
+    spot_bid_price = pl.col('spot_bid_price')
+    call_ask_price = pl.col('call_ask_price') * fut_bid_price
+    call_bid_price = pl.col('call_bid_price') * fut_ask_price
+    put_ask_price = pl.col('put_ask_price') * fut_ask_price
+    put_bid_price = pl.col('put_bid_price') * fut_bid_price
+    strike = pl.col('strike')
     df = df.with_columns([
-        (pl.col('call_ask_price') - pl.col('put_bid_price') - pl.col('fut_bid_price') + pl.col('strike')).alias('pcpb_forward'),
-        (pl.col('call_bid_price') - pl.col('put_ask_price') - pl.col('fut_ask_price') + pl.col('strike')).alias('pcpb_backward')
+        (call_ask_price - put_bid_price - fut_bid_price + strike).alias('pcpb_forward'),
+        (call_bid_price - put_ask_price - fut_ask_price + strike).alias('pcpb_backward')
     ])
     return df
 
 
-def mark_up_with_futures(resampled_df):
-    ref_sym = 'BTC-USD'
+def mark_up_with_futures(resampled_df, ref_syms=['BTC-USD','ETH-USD']):
+    fut_dfs = []
+    opt_dfs = []
+    for ref_sym  in ref_syms:
+        fut_df = resampled_df.filter(
+            (pl.col('ref_sym') == ref_sym) & (pl.col('pc') == 'F')
+        ).rename({
+            'ask_amount': 'fut_ask_amount',
+            'ask_price': 'fut_ask_price',
+            'bid_amount': 'fut_bid_amount',
+            'bid_price': 'fut_bid_price',
+            'stale': 'fut_stale',
+            'exp': 'fut_exp'
+        })
 
-    fut_df = resampled_df.filter(
-        (pl.col('ref_sym') == ref_sym) & (pl.col('pc') == 'F')
-    ).rename({
-        'ask_amount': 'fut_ask_amount',
-        'ask_price': 'fut_ask_price',
-        'bid_amount': 'fut_bid_amount',
-        'bid_price': 'fut_bid_price',
-        'exp': 'fut_exp'
-    })
+        spot_df = resampled_df.filter(
+            (pl.col('ref_sym') == ref_sym) & (pl.col('pc') == 'S')
+        ).rename({
+            'ask_amount': 'spot_ask_amount',
+            'ask_price': 'spot_ask_price',
+            'bid_amount': 'spot_bid_amount',
+            'bid_price': 'spot_bid_price',
+            'stale': 'spot_stale',
+        })
 
-    opt_df = resampled_df.filter(
-        (pl.col('ref_sym') == ref_sym) & (pl.col('pc').is_in(['C', 'P']))
-    )
+        fut_df = fut_df.join(
+            spot_df.select(['ts', 'spot_sym', 'spot_ask_amount', 'spot_ask_price', 'spot_bid_amount', 'spot_bid_price', 'spot_stale']),
+            on=['ts', 'spot_sym'],
+            how='left'
+        )
 
-    opt_df = opt_df.join(
-        fut_df.select(['ts', 'fut_sym', 'fut_ask_amount', 'fut_ask_price', 'fut_bid_amount', 'fut_bid_price', 'fut_exp']),
-        on=['ts', 'fut_sym'],
-        how='left'
-    )
+        opt_df = resampled_df.filter(
+            (pl.col('ref_sym') == ref_sym) & (pl.col('pc').is_in(['C', 'P']))
+        )
 
-    return opt_df, fut_df
+        opt_df = opt_df.join(
+            fut_df.select(['ts', 'fut_sym', 'fut_ask_amount', 'fut_ask_price', 'fut_bid_amount', 'fut_bid_price', 'fut_exp', 'fut_stale']),
+            on=['ts', 'fut_sym'],
+            how='left'
+        )
+
+        opt_df = opt_df.join(
+            spot_df.select(['ts', 'spot_sym', 'spot_ask_amount', 'spot_ask_price', 'spot_bid_amount', 'spot_bid_price', 'spot_stale']),
+            on=['ts', 'spot_sym'],
+            how='left'
+        )
+        fut_dfs.append(fut_df)
+        opt_dfs.append(opt_df)
+
+    opt_all = pl.concat(opt_dfs) if opt_dfs else pl.DataFrame()
+    fut_all = pl.concat(fut_dfs) if fut_dfs else pl.DataFrame()
+
+    return opt_all, fut_all
 
 
-def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_tag='resampled'):
-    chunksize = 500_000
-    df_iters, dayinfo = iter_datasets(fr, chunksize=chunksize)
+def merge_data(fr,  to=None, freq='1min', output_tag='resampled', force_reload=False, cleanup=False):
+    '''
+    merge_data only deals with a single day (fr), the to argument only serves to
+    cut the day sort for testing
+    '''
+    fr = pd.Timestamp(fr)
+    if to is None:
+        to = fr + pd.Timedelta('1D')
+    to = pd.Timestamp(to)
+    if pd.Timestamp(fr.date()) == fr:
+        fr = f'{fr.date()}'
+    else:
+        fr = f'{fr}'
+    if pd.Timestamp(to.date()) == to:
+        to = f'{to.date()}'
+    else:
+        to = f'{to}'
+
+    fname = f'{datadir}/okex-options_{output_tag}_{fr}_{freq}.parquet'
+    if not force_reload and os.path.exists(fname):
+        return pl.read_parquet(fname)
+    chunksize = 1_500_000
+    df_iters, dayinfo = iter_datasets(fr, chunksize=chunksize, cleanup=cleanup)
 
     iter_keys = list(df_iters.keys())
 
     dfs = {k: pl.DataFrame() for k in iter_keys}
     stop_conditions = {k: False for k in iter_keys}
-    process_to = {k: pd.Timestamp.max.to_pydatetime() for k in iter_keys}
+    process_to = {k: datetime.max for k in iter_keys}
 
-    cols_to_save = ['ref_sym', 'fut_sym', 'exp', 'pc', 'strike']
+    cols_to_save = ['ref_sym', 'fut_sym', 'spot_sym', 'exp', 'pc', 'strike']
     cols_to_save += ['bid_price', 'ask_price', 'bid_amount', 'ask_amount']
-    all_symbols = sorted(list(set(list(dayinfo.opt_symbols) + list(dayinfo.fut_symbols))))
+    all_symbols = sorted(list(set(list(dayinfo.opt_symbols) + list(dayinfo.fut_symbols) + ['BTC-USDT','ETH-USDT'])))
 
     last_values = {sym: {col: None for col in cols_to_save} for sym in all_symbols}
     output_chunks = []
     logger.info(f'done prep')
 
-    to_timestamp = pd.Timestamp.max.to_pydatetime() if to == 'max' else pd.Timestamp(to).to_pydatetime()
+    to_timestamp = datetime.max if to == 'max' else datetime.fromisoformat(to)
 
     while True:
         # 1. Refill buffers
@@ -129,12 +195,12 @@ def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_ta
         # 2. Safe processing window
         cutoff = min([process_to[sym] for sym in iter_keys])
         if all([stop_conditions[sym] for sym in iter_keys]):
-            cutoff = pd.Timestamp.max.to_pydatetime()
+            cutoff = datetime.max
 
         logger.info(f'done read up to cutoff {cutoff}')
 
         # 3. Slice data up to cutoff
-        if cutoff == pd.Timestamp.max.to_pydatetime():
+        if cutoff == datetime.max:
             df_slices = dfs
             dfs = {sym: pl.DataFrame() for sym in iter_keys}
         else:
@@ -142,8 +208,8 @@ def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_ta
             dfs = {sym: dfs[sym].filter(pl.col('ts') >= cutoff) for sym in iter_keys}
 
         if all([df_slices[sym].is_empty() for sym in iter_keys]):
-            logger.info('refill buffers')
-            continue
+            logger.info('ran out of data for the day before the end of the day')
+            break
 
         # 4. Merge and Pivot
         min_ts = None
@@ -154,7 +220,8 @@ def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_ta
             if df.is_empty():
                 continue
             if sym == 'OPTIONS':
-                for s, g in df.partition_by('symbol', as_dict=True).items():
+                for ss, g in df.partition_by('symbol', as_dict=True).items():
+                    s = ss[0] # apparently the key here is a tuple
                     current_data_map[s] = g
                     ts_min = g.select('ts').min().item()
                     ts_max = g.select('ts').max().item()
@@ -170,30 +237,47 @@ def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_ta
         if min_ts is None:
             continue
 
-        t_start = pd.Timestamp(min_ts).floor(freq).to_pydatetime()
-        t_end = min(pd.Timestamp(max_ts).ceil(freq).to_pydatetime(), cutoff if cutoff != pd.Timestamp.max.to_pydatetime() else max_ts)
+        # Floor/ceil to frequency using pandas for precision
+        t_start = pd.Timestamp(min_ts).floor(freq)
+        t_end = min(pd.Timestamp(max_ts).ceil(freq), cutoff if cutoff != datetime.max else max_ts)
 
-        # Create time grid
-        grid = pl.from_pandas(pd.date_range(t_start, t_end, freq=freq))
-
+        # Create time grid with microsecond precision
+        grid = (
+            pl.Series(pd.date_range(t_start, t_end, freq=freq))
+            .cast(pl.Datetime(TIMESTAMP_UNIT))
+        )
         chunk_dfs = []
+        schema = {
+            "ts": pl.Datetime("us"),
+            "symbol": pl.String,
+            "ref_sym": pl.String,
+            "fut_sym": pl.String,
+            "spot_sym": pl.String,
+            "exp": pl.Datetime("us"),
+            "pc": pl.String,
+            "strike": pl.Float64,
+            "bid_price": pl.Float64,
+            "ask_price": pl.Float64,
+            "bid_amount": pl.Float64,
+            "ask_amount": pl.Float64,
+            'stale': pl.Boolean,
+        }
+
         for sym in all_symbols:
             df = current_data_map.get(sym)
             last_val = last_values[sym]
 
             if df is not None and not df.is_empty():
-                df_dedup = df.unique(subset=['ts'], keep='last').select(cols_to_save+['ts'])
+                df_dedup = df.unique(subset=['ts'], keep='last').select(['ts']+cols_to_save).sort('ts')
                 # Forward fill
-                df_filled = df_dedup.join(
-                    grid.to_frame('ts'),
+                df_filled = pl.DataFrame({'ts':grid}).join_asof(
+                    df_dedup,
                     on='ts',
-                    how='right'
-                ).sort('ts').with_columns(
-                    [pl.col(col).forward_fill() for col in cols_to_save]
+                    strategy='backward'
                 )
             else:
-                df_filled = grid.to_frame('ts').with_columns([
-                    pl.lit(None).alias(col) for col in cols_to_save
+                df_filled = pl.DataFrame({'ts':grid}).with_columns([
+                    pl.lit(None, dtype=schema[col]).alias(col) for col in cols_to_save
                 ])
 
             # Update last values
@@ -204,7 +288,19 @@ def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_ta
                         last_values[sym][col] = last_row[col]
 
             df_filled = df_filled.with_columns(pl.lit(sym).alias('symbol'))
+            df_filled = df_filled.select(['ts','symbol'] + cols_to_save) #reorder columns
             chunk_dfs.append(df_filled)
+
+        for i, d in enumerate(chunk_dfs):
+            if i == 0:
+                base = d.schema
+            else:
+                if d.schema != base:
+                    print("Schema mismatch at", i)
+                    print("base:", base)
+                    print("this:", d.schema)
+                    break
+
 
         resampled = pl.concat(chunk_dfs)
         resampled = resampled.sort('ts')
@@ -212,7 +308,7 @@ def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_ta
         if not resampled.is_empty():
             output_chunks.append(resampled)
 
-        if cutoff > pl.Datetime(to):
+        if cutoff > to_timestamp:
             logger.info(f"Cutoff {cutoff} exceeds 'to' timestamp {to}. Finalizing output.")
             break
 
@@ -224,10 +320,73 @@ def merge_data(fr='2025-01-02', to='2025-01-02 00:10:00', freq='1min', output_ta
     final_df = pl.concat(output_chunks)
     final_df = final_df.unique(subset=['ts', 'symbol'], keep='last')
 
-    fname = f'{datadir}/okex-options_{output_tag}_{fr}_{freq}.parquet'
+    # Ensure all datetime columns use microsecond resolution
+    final_df = final_df.with_columns([
+        pl.col('ts').cast(pl.Datetime(TIMESTAMP_UNIT)),
+        pl.col('exp').cast(pl.Datetime(TIMESTAMP_UNIT))
+    ])
+
+    # extend static metadata over all rows for each symbol, even
+    # when there was no quote then.
+
+    static_cols = ["ref_sym", "fut_sym", "spot_sym", "exp", "pc", "strike"]
+
+    final_df = final_df.with_columns(
+        [
+            pl.col(c)
+            .fill_null(pl.col(c).drop_nulls().first().over("symbol"))
+            .alias(c)
+            for c in static_cols
+        ]
+    )
+
+    check_consistent  = final_df.group_by("symbol").agg(
+        [pl.col(c).n_unique().alias(f"{c}_n_unique") for c in static_cols]
+    ).filter(
+        pl.any_horizontal([pl.col(f"{c}_n_unique") > 1 for c in static_cols])
+    )
+    if len(check_consistent):
+        raise RuntimeError('inconsistent metadata')
+
+
+    # forward fill price data
+    price_cols = ["bid_price", "ask_price", "bid_amount", "ask_amount"]
+    final_df = final_df.sort(["symbol", "ts"])
+
+    final_df = final_df.with_columns(
+        (
+            pl.col("bid_price").is_null() | pl.col("ask_price").is_null()
+        ).alias("stale")
+    )
+
+    final_df = final_df.with_columns(
+        [
+            pl.col(c)
+            .fill_null(strategy="forward")
+            .over("symbol")
+            .alias(c)
+            for c in price_cols
+        ]
+    )
+
+    if cleanup:
+        cleanup_daily_files(dayinfo)
+
     final_df.write_parquet(fname)
     logger.info(f"Wrote {len(final_df)} total rows to {fname}")
+    return final_df
 
+def cleanup_daily_files(dayinfo):
+    def _corresponding_csv(fn):
+        res = fn.replace('.parquet', '.csv.gz')
+        return res
+    fnames = [dayinfo.opt_quotes_fname, dayinfo.btc_quotes_fname, dayinfo.eth_quotes_fname,
+              dayinfo.opt_symbols_fname, dayinfo.fut_symbols_fname, dayinfo.fut_derivative_ticker_fname]
+    fnames += dayinfo.fut_quotes_fnames.values()
+    fnames += [_corresponding_csv(fn) for fn in fnames]
+    for fn in fnames:
+        Path(fn).unlink(missing_ok=True)
+    return 
 
 @dataclass(frozen=False, slots=False)
 class DayInfo:
@@ -236,6 +395,11 @@ class DayInfo:
     fut_symbols: List[str]
     opt_quotes_fname: str
     fut_quotes_fnames: Dict[str, str]
+    btc_quotes_fname: str
+    eth_quotes_fname: str
+    opt_symbols_fname: str
+    fut_symbols_fname: str
+    fut_derivative_ticker_fname: str
 
 
 def read_parquet_chunks(path, chunksize):
@@ -247,8 +411,8 @@ def read_parquet_chunks(path, chunksize):
     return iter_chunks()
 
 
-def iter_datasets(fr='2025-01-02', chunksize=100000):
-    dayinfo = download_multiple_csvs([fr])
+def iter_datasets(fr='2025-01-02', chunksize=100000, cleanup=False):
+    dayinfo = download_multiple_csvs(fr, cleanup=cleanup)
     logger.info(f"Initializing iterators for {dayinfo.date}")
     opt_df_iter = read_parquet_chunks(dayinfo.opt_quotes_fname, chunksize=chunksize)
 
@@ -258,6 +422,10 @@ def iter_datasets(fr='2025-01-02', chunksize=100000):
 
     df_iters = fut_df_iters
     df_iters['OPTIONS'] = opt_df_iter
+
+    df_iters['BTC-USDT'] = read_parquet_chunks(dayinfo.btc_quotes_fname, chunksize=chunksize)
+    df_iters['ETH-USDT'] = read_parquet_chunks(dayinfo.eth_quotes_fname, chunksize=chunksize)
+
     logger.info(f'done creating {len(df_iters)} iterators')
     return df_iters, dayinfo
 
@@ -268,6 +436,7 @@ def augment_quotes(df: pl.DataFrame) -> pl.DataFrame:
     Expected symbol formats:
       - Futures:  BTC-USD-250331
       - Options:  BTC-USD-250331-30000-C
+      - Spot: BTC-USD
     local_timestamp assumed to be in microseconds since epoch.
     """
     if df.is_empty():
@@ -279,7 +448,7 @@ def augment_quotes(df: pl.DataFrame) -> pl.DataFrame:
         [
             parts.list.get(0).alias("_A"),
             parts.list.get(1).alias("_B"),
-            parts.list.get(2).alias("exp_str"),
+            parts.list.get(2, null_on_oob=True).alias("exp_str"),
             parts.list.get(3, null_on_oob=True).alias("_D"),  # strike (options) or null (futures)
             parts.list.get(4, null_on_oob=True).alias("_E"),  # P/C (options) or null (futures)
         ]
@@ -287,96 +456,126 @@ def augment_quotes(df: pl.DataFrame) -> pl.DataFrame:
 
     df = df.with_columns(
         [
-            # strike: only present for options; parse safely
             pl.when(pl.col("_D").is_not_null())
-              .then(pl.col("_D").cast(pl.Float64, strict=False))
-              .otherwise(pl.lit(None, dtype=pl.Float64))
-              .alias("strike"),
+            .then(pl.col("_D").cast(pl.Float64, strict=False))
+            # strike: only present for options; parse safely
+            .otherwise(pl.lit(None, dtype=pl.Float64))
+            .alias("strike"),
 
-            # pc: use 'F' for futures if missing
-            pl.when(pl.col("_E").is_not_null())
-              .then(pl.col("_E"))
-              .otherwise(pl.lit("F"))
-              .alias("pc"),
+            # pc: use 'F' for futures, S for spot
+            pl.when(pl.col('exp_str').is_null())
+            .then(pl.lit('S'))
+            .when(pl.col('_E').is_null())
+            .then(pl.lit('F'))
+            .otherwise(pl.col('_E'))
+            .alias("pc"),
 
-            # Normalize quote/settle ticker USD -> USDT if that's your convention
-            pl.when(pl.col("_B") == "USD")
-              .then(pl.lit("USDT"))
-              .otherwise(pl.col("_B"))
-              .alias("_BT"),
+            # for options on XXXUSD the right hedge instrument is the XXXUSDT future
+            pl.when((pl.col("_B").is_in(["USD","USDT"])&(pl.col("_E").is_in(['C','P']) )))
+            .then(pl.lit("USDT"))
+            .otherwise(pl.col("_B"))
+            .alias("_BT"),
+
+            pl.when((pl.col("_B").is_in(["USD","USDT"]))&(pl.col("_E").is_in(['F','S']) ))
+            .then(pl.lit("USD"))
+            .otherwise(pl.lit("USD"))
+            .alias("_BB"),
         ]
     )
 
     df = df.with_columns(
         [
             pl.concat_str([pl.col("_A"), pl.col("_BT"), pl.col("exp_str")], separator="-").alias("fut_sym"),
-            pl.concat_str([pl.col("_A"), pl.col("_B")], separator="-").alias("ref_sym"),
 
-            # exp_str like '250331' -> Date -> Datetime (midnight)
+            pl.concat_str([pl.col("_A"), pl.col("_BT")], separator="-").alias("spot_sym"),
+
+            pl.concat_str([pl.col("_A"), pl.col("_BB")], separator="-").alias("ref_sym"),
+
+            # exp_str like '250331' -> Date -> Datetime (midnight, microsecond precision)
             pl.col("exp_str")
               .str.strptime(pl.Date, format="%y%m%d", strict=False)
-              .cast(pl.Datetime)
+              .cast(pl.Datetime(TIMESTAMP_UNIT))
               .alias("exp"),
 
             # local_timestamp microseconds since epoch -> Datetime(us)
-            pl.from_epoch(pl.col("local_timestamp"), time_unit="us").alias("ts"),
+            pl.from_epoch(pl.col("local_timestamp"), time_unit=TIMESTAMP_UNIT).alias("ts"),
         ]
     )
 
-    df = df.drop(["_A", "_B", "_BT", "exp_str", "_D", "_E"], strict=False)
+    df = df.drop(["_A", "_B", "_BT", "_BB", "exp_str", "_D", "_E"], strict=False)
+
+    #print('augment quotes\n',df.to_pandas())
     return df
 
 
 
-def download_multiple_csvs(frs=['2025-01-02']):
+def download_multiple_csvs(fr='2025-01-02', cleanup=False):
     todo = pl.DataFrame({
-        'ex': ['okex-futures', 'okex-options'],
-        'dt': ['derivative_ticker', 'quotes'],
-        'sym': ['FUTURES', 'OPTIONS']
+        'ex': ['okex-futures', 'okex-options','okex','okex'],
+        'dt': ['derivative_ticker', 'quotes', 'quotes','quotes'],
+        'sym': ['FUTURES', 'OPTIONS','BTC-USDT','ETH-USDT']
     })
 
-    for fr in frs:
-        to = str((pd.Timestamp(fr) + pd.Timedelta(days=1)).date())
-        for row in todo.iter_rows(named=True):
-            ex, dt, sym = row['ex'], row['dt'], row['sym']
-            try:
-                download_single_csv(ex, dt, fr, to, sym)
-            except Exception as e:
-                logger.warning(e)
-                pass
+    to = str((pd.Timestamp(fr) + pd.Timedelta(days=1)).date())
+    for row in todo.iter_rows(named=True):
+        ex, dt, sym = row['ex'], row['dt'], row['sym']
+        try:
+            fname = download_single_csv(ex, dt, fr, to, sym, cleanup=cleanup)
+            if sym=='BTC-USDT':
+                btc_quotes_fname = fname
+            if sym=='ETH-USDT':
+                eth_quotes_fname = fname
+        except Exception as e:
+            logger.warning(e)
+            pass
 
-        futfname = download_single_csv('okex-futures', 'derivative_ticker', fr, to, 'FUTURES')
-        fut_symbols_fname = futfname + '_syms.pkl'
-        if os.path.exists(fut_symbols_fname):
-            with open(fut_symbols_fname, 'rb') as f:
-                fut_symbols = pickle.load(f)
-        else:
-            futs_df = pl.read_parquet(futfname)
-            fut_symbols = futs_df.select('symbol').unique().to_series().to_list()
-            with open(fut_symbols_fname, 'wb') as f:
-                pickle.dump(fut_symbols, f)
+    fut_derivative_ticker_fname = download_single_csv('okex-futures', 'derivative_ticker', fr, to, 'FUTURES', cleanup=cleanup)
+    fut_symbols_fname = fut_derivative_ticker_fname + '_syms.pkl'
+    if os.path.exists(fut_symbols_fname):
+        with open(fut_symbols_fname, 'rb') as f:
+            fut_symbols = pickle.load(f)
+    else:
+        fut_symbols = (
+            pl.scan_parquet(fut_derivative_ticker_fname)
+              .select(pl.col("symbol"))
+              .unique()
+              .collect(streaming=True)     # keep memory down
+              .get_column("symbol")
+              .to_list()
+        )
 
-        fut_quotes_fnames = {}
-        for futsym in fut_symbols:
-            fut_quotes_fnames[futsym] = download_single_csv('okex-futures', 'quotes', fr, fr, futsym)
+        with open(fut_symbols_fname, 'wb') as f:
+            pickle.dump(fut_symbols, f)
 
-        opt_quotes_fname = download_single_csv('okex-options', 'quotes', fr, to, 'OPTIONS')
-        opt_symbols_fname = opt_quotes_fname + '_syms.pkl'
-        if os.path.exists(opt_symbols_fname):
-            with open(opt_symbols_fname, 'rb') as f:
-                opt_symbols = pickle.load(f)
-        else:
-            opts_df = pl.read_parquet(opt_quotes_fname)
-            opt_symbols = opts_df.select('symbol').unique().to_series().to_list()
-            with open(opt_symbols_fname, 'wb') as f:
-                pickle.dump(opt_symbols, f)
+    fut_quotes_fnames = {}
+    for futsym in fut_symbols:
+        fut_quotes_fnames[futsym] = download_single_csv('okex-futures', 'quotes', fr, fr, futsym, cleanup=cleanup)
 
-        return DayInfo(fr, opt_symbols, fut_symbols, opt_quotes_fname, fut_quotes_fnames)
+    opt_quotes_fname = download_single_csv('okex-options', 'quotes', fr, to, 'OPTIONS', cleanup=cleanup)
+    opt_symbols_fname = opt_quotes_fname + '_syms.pkl'
+    if os.path.exists(opt_symbols_fname):
+        with open(opt_symbols_fname, 'rb') as f:
+            opt_symbols = pickle.load(f)
+    else:
+        opt_symbols = (
+            pl.scan_parquet(opt_quotes_fname)
+              .select(pl.col("symbol"))
+              .unique()
+              .collect(streaming=True)     # keep memory down
+              .get_column("symbol")
+              .to_list()
+        )
+        with open(opt_symbols_fname, 'wb') as f:
+            pickle.dump(opt_symbols, f)
+
+    return DayInfo(fr, opt_symbols, fut_symbols, opt_quotes_fname,
+                   fut_quotes_fnames, btc_quotes_fname, eth_quotes_fname,
+                   opt_symbols_fname, fut_symbols_fname, fut_derivative_ticker_fname)
 
 
-def download_single_csv(ex, dt, fr, to, sym):
+def download_single_csv(ex, dt, fr, to, sym, cleanup=False):
     csv_fname = f'{datadir}/{ex}_{dt}_{fr}_{sym}.csv.gz'
-    pq_fname = f'{datadir}/{ex}_{dt}_{fr}_{sym}.parquet'
+    pq_fname  = f'{datadir}/{ex}_{dt}_{fr}_{sym}.parquet'
 
     if os.path.exists(pq_fname):
         logger.debug(f'Parquet file already exists: {pq_fname}')
@@ -390,20 +589,130 @@ def download_single_csv(ex, dt, fr, to, sym):
             from_date=fr,
             to_date=to,
             symbols=[sym],
-            api_key=os.environ.get('TARDIS_API_KEY', None)
+            api_key=os.environ.get('TARDIS_API_KEY', None),
+            download_dir=datadir
         )
-    else:
-        logger.debug(f'CSV already here {csv_fname}')
 
-    logger.info(f'Converting {csv_fname} to {pq_fname}...')
+    logger.info(f"Streaming convert {csv_fname} to {pq_fname}")
 
-    df = pl.read_csv(csv_fname)
-    df.write_parquet(pq_fname)
-    logger.info(f'Finished converting to {pq_fname}')
+    convert_opts = pv.ConvertOptions(
+        column_types={
+            "timestamp": pa.int64(),
+            "local_timestamp": pa.int64(),
+            "bid_price": pa.float64(),
+            "ask_price": pa.float64(),
+            "bid_amount": pa.float64(),
+            "ask_amount": pa.float64(),
+            "symbol": pa.string(),
+            "exchange": pa.string(),
+        },
+        null_values=["", "null", "None"],
+    )
+
+    # Smaller block_size reduces peak memory; increase if you want bigger row groups.
+    read_opts = pv.ReadOptions(block_size=512 * 1024 * 1024)  # 0.5 G
+
+    reader = pv.open_csv(
+        csv_fname,
+        read_options=read_opts,
+        convert_options=convert_opts,
+    )
+
+    writer = None
+    batches = []
+    target_batches = 8  # combine batches into larger row groups
+
+    try:
+        for batch in reader:  # batch: pyarrow.RecordBatch
+            batches.append(batch)
+
+            if len(batches) >= target_batches:
+                table = pa.Table.from_batches(batches)
+                if writer is None:
+                    writer = pq.ParquetWriter(pq_fname, table.schema, compression="snappy")
+                writer.write_table(table)
+                batches.clear()
+
+        # flush remainder
+        if batches:
+            table = pa.Table.from_batches(batches)
+            if writer is None:
+                writer = pq.ParquetWriter(pq_fname, table.schema, compression="snappy")
+            writer.write_table(table)
+
+    finally:
+        if writer is not None:
+            writer.close()
+
+    logger.info(f"Finished streaming convert to {pq_fname}")
+    if cleanup:
+        Path(csv_fname).unlink(missing_ok=True)
+        logger.info(f"Cleaned up {csv_fname}")
     return pq_fname
 
+# def download_single_csv(ex, dt, fr, to, sym):
+#     csv_fname = f'{datadir}/{ex}_{dt}_{fr}_{sym}.csv.gz'
+#     pq_fname = f'{datadir}/{ex}_{dt}_{fr}_{sym}.parquet'
+
+#     if os.path.exists(pq_fname):
+#         logger.debug(f'Parquet file already exists: {pq_fname}')
+#         return pq_fname
+
+#     if not os.path.exists(pq_fname):
+        
+#         logger.info(f'Downloading {csv_fname}')
+#         datasets.download(
+#             exchange=ex,
+#             data_types=[dt],
+#             from_date=fr,
+#             to_date=to,
+#             symbols=[sym],
+#             api_key=os.environ.get('TARDIS_API_KEY', None),
+#             download_dir=datadir
+#         )
+#         logger.info(f'Converting {csv_fname} to {pq_fname}...')
+
+#         df = pl.read_csv(csv_fname, dtypes={
+#             "timestamp": pl.Int64,
+#             "local_timestamp": pl.Int64,
+#             "bid_price": pl.Float64,
+#             "ask_price": pl.Float64,
+#             "bid_amount": pl.Float64,
+#             "ask_amount": pl.Float64,
+#             "symbol": pl.String,
+#             "exchange": pl.String,
+#         })
+#         df.write_parquet(pq_fname)
+#         logger.info(f'Finished converting to {pq_fname}')
+#     else:
+#         logger.debug(f'parquet file  already here {pq_fname}')
+
+#     return pq_fname
+
+def main(fr='2026-01-01', to=None, cleanup=False, output_tag='test', force_reload=False):
+    if to is None:
+        to = fr
+    pcpbs = []
+    for day in pd.date_range(fr, to, freq='1D'):
+
+        resampled_df = merge_data(day, freq='1min', output_tag=output_tag,
+                        force_reload=force_reload, cleanup=cleanup)
+        opt_df, fut_df = mark_up_with_futures(resampled_df)
+        pcpb = pcp_breaking(opt_df)
+        pcpb.write_parquet(f'{datadir}/pcpb_{output_tag}_{day.date()}.parquet')
+        print(pcpb.to_pandas())
+        #pcpbs.append(pcpb)
+    return pcpbs
 
 if __name__ == '__main__':
-    merge_data(fr='2025-01-02', to='2025-01-02 00:00:10', freq='1min', output_tag='1min')
+    if len(sys.argv)>1:
+        day = sys.argv[1]
+    else:
+        day = '2025-01-01'
+    if len(sys.argv)>2:
+        to = sys.argv[2]
+    else:
+        to = None
 
-
+    print(day)
+    main(day, to, cleanup=True, output_tag='prod')
