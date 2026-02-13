@@ -156,7 +156,10 @@ def run_deribit_attack(date_str='2025-12-05', freq='1min'):
     final_chunks = []
     for t in active_targets:
         c, p, f = t['call_symbol'], t['put_symbol'], t['future_symbol']
+        
+        # Csak akkor számolunk, ha mindhárom lábhoz van adatunk
         if all(s in symbol_data for s in [c, p, f]):
+            # Adatok összefésülése időbélyeg (index) alapján
             merged = pd.concat([
                 symbol_data[c].rename(columns={'ask_price': 'c_ask', 'bid_price': 'c_bid'}),
                 symbol_data[p].rename(columns={'ask_price': 'p_ask', 'bid_price': 'p_bid'}),
@@ -164,11 +167,33 @@ def run_deribit_attack(date_str='2025-12-05', freq='1min'):
             ], axis=1).reset_index().rename(columns={'index': 'ts'})
             
             merged['strike'] = float(t['strike'])
-            # PCP Breaking Formula standardized to USD arbitrage value
-            merged['pcpb_forward'] = (merged['c_ask'] - merged['p_bid']) * merged['f_bid'] - (merged['f_bid'] - merged['strike'])
-            merged['pcpb_backward'] = (merged['c_bid'] - merged['p_ask']) * merged['f_ask'] - (merged['f_ask'] - merged['strike'])
+            
+            is_linear = "_USDC" in f
+            
+            if is_linear:
+                # LINEAR (USDC) KÉPLET: (C - P) - (F - K)
+                merged['pcpb_forward'] = (merged['c_ask'] - merged['p_bid']) - (merged['f_bid'] - merged['strike'])
+                merged['pcpb_backward'] = (merged['c_bid'] - merged['p_ask']) - (merged['f_ask'] - merged['strike'])
+            else:
+                # INVERSE (Coin) KÉPLET: (C - P)*F - (F - K)
+                merged['pcpb_forward'] = (merged['c_ask'] - merged['p_bid']) * merged['f_bid'] - (merged['f_bid'] - merged['strike'])
+                merged['pcpb_backward'] = (merged['c_bid'] - merged['p_ask']) * merged['f_ask'] - (merged['f_ask'] - merged['strike'])
+
+            # Csak ezeket az oszlopokat tartjuk meg (mint az OKX scriptnél)
+            cols = [
+                'ts', 
+                'pcpb_forward', 'pcpb_backward', 
+                'c_ask', 'c_bid', 
+                'p_ask', 'p_bid', 
+                'f_ask', 'f_bid', 
+                'strike'
+            ]
+            
+            merged = merged[cols]
+            
             final_chunks.append(merged)
 
+    # Mentés
     if final_chunks:
         out_file = f"{DATADIR}/deribit_pcp_results_{date_str}_{freq}.parquet"
         pd.concat(final_chunks).to_parquet(out_file)
