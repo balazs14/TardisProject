@@ -6,7 +6,9 @@ datasets
 .env
 .env.*
 !.env.example
+<<<<<<< HEAD
 build
 okex
 attic
 *.tmp
+deribit_data/
