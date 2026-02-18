@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from tardis_dev import datasets
 import pandas as pd
 
+
 # ---------------------------------------------------------
 # 1. KONFIGURÁCIÓ
 # ---------------------------------------------------------
@@ -261,11 +262,27 @@ def analyze_day(date_str):
             diff_bwd = pl.col("c_bid") - pl.col("p_ask")
             
             if is_linear:
-                calc_fwd = diff_fwd - (pl.col("f_bid") - pl.lit(K))
-                calc_bwd = diff_bwd - (pl.col("f_ask") - pl.lit(K))
+                # Linear (USDC): Everything is in USDC.
+                # Fwd Arb: Long Future, Short Syn (Sell C, Buy P)
+                calc_fwd = (pl.col("c_bid") - pl.col("p_ask")) - (pl.col("f_ask") - pl.lit(K))
+                
+                # Bwd Arb: Short Future, Long Syn (Buy C, Sell P)
+                calc_bwd = (pl.col("f_bid") - pl.lit(K)) - (pl.col("c_ask") - pl.col("p_bid"))
+                
             else:
-                calc_fwd = (diff_fwd * pl.col("f_bid")) - (pl.col("f_bid") - pl.lit(K))
-                calc_bwd = (diff_bwd * pl.col("f_ask")) - (pl.col("f_ask") - pl.lit(K))
+                # Inverse (Coin): Premiums in Coin, Future in USD.
+                # We calculate profit in USD terms for consistency.
+                
+                # Fwd Arb: Long Future (Inverse), Short Syn (Sell C, Buy P)
+                # We interpret (c_bid - p_ask) as BTC premium. Converted to USD approx via f_ask.
+                term_syn_usd = (pl.col("c_bid") - pl.col("p_ask")) * pl.col("f_ask")
+                term_fut_usd = pl.col("f_ask") - pl.lit(K)
+                calc_fwd = term_syn_usd - term_fut_usd 
+                
+                # Bwd Arb: Short Future, Long Syn
+                term_syn_usd_buy = (pl.col("c_ask") - pl.col("p_bid")) * pl.col("f_bid")
+                term_fut_usd_sell = pl.col("f_bid") - pl.lit(K)
+                calc_bwd = term_fut_usd_sell - term_syn_usd_buy
 
             res = merged.select([
                 pl.col("ts"),
