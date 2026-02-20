@@ -6,3 +6,7 @@ datasets
 .env
 .env.*
 !.env.example
+build
+okex
+attic
+*.tmp

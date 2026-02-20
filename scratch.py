@@ -5,7 +5,7 @@ import requests
 import asyncio
 from datetime import date
 import pandas as pd
-import lib.pandas_utils as pu
+import TardisProject.lib.pandas_utils as pu
 from bs4 import BeautifulSoup
 
 # Load API key from environment or .env (if python-dotenv is installed)
@@ -18,10 +18,10 @@ except Exception:
 from tardis_client import TardisClient, Channel
 from tardis_dev import datasets
 
-# 
+#
 # The goal of these is to explore programmatically the available data on
 # https://docs.tardis.dev/downloadable-csv-files
-# 
+#
 
 # this here is not really the beginnings of a library, these are scripts to be modified at will
 # for exploration
@@ -31,7 +31,7 @@ def pick_exchanges():
     # we can find at least bid/ask data for options contracts, as well as for
     # the underlying. This here I just looked at where the available channels contain
     # some obvious strings like "quote" or "Book"
-    
+
     resp = requests.get("https://api.tardis.dev/v1/exchanges")
     resp.raise_for_status()
     exchanges = resp.json()
@@ -44,7 +44,7 @@ def pick_exchanges():
     def has_option_quotes(row):
         channels = list(row.availableChannels)
         has_quotes = any( reg.search(ch) for reg in compiled for ch in channels)
-        is_option = 'option' in row.id 
+        is_option = 'option' in row.id
         not_expired = pd.isna(row.availableTo)
         #not_expired = True
         return has_quotes and is_option and not_expired
@@ -83,8 +83,8 @@ def get_info_on_exchange():
     currdf['pc'] = currdf.id.str.split('-').apply(lambda x: x[3])
     print(currdf[['undr','maturity']].drop_duplicates().set_index(['maturity','undr'],drop=False).sort_index().unstack('undr').undr.fillna(0))
     btc_symbols = currdf.loc[currdf.undr=='BTC', 'id']
-    
-    
+
+
 def get_stream_of_data():
     #
     # get stream of lines from an exchange
@@ -120,7 +120,7 @@ def get_stream_of_data():
     #
     asyncio.run(replay())
     #await replay()
-    
+
 
 def example_download_of_a_dataset():
 
@@ -145,7 +145,7 @@ def list_tardis_csv(exchange, channel, date):
     return resp.text
 files = list_tardis_csv("binance-european-options", "trade", date(2025, 5, 1))
 print(files)
-            
+
 
 def convert_csv_to_parquet():
 
@@ -157,4 +157,4 @@ def convert_csv_to_parquet():
 
     trades.to_parquet('datasets/deribit_trades_2023-11-01_OPTIONS.parquet')
 
-    
+

@@ -36,8 +36,11 @@ datadir = 'okex'
 # Use microsecond resolution for all timestamps
 TIMESTAMP_UNIT = 'us'
 
-
 def align_calls_puts(opt_df):
+    pandas_interface = False
+    if isinstance(opt_df, pd.DataFrame):
+        pandas_interface = True
+        opt_df = pl.from_pandas(opt_df)
     # Separate calls and puts
     calls = opt_df.filter(pl.col('pc') == 'C').clone()
     puts = opt_df.filter(pl.col('pc') == 'P').clone()
@@ -55,26 +58,209 @@ def align_calls_puts(opt_df):
 
     # Merge on keys
     on_keys = ['ts', 'ref_sym', 'fut_sym', 'exp', 'strike']
-    return calls.join(puts, on=on_keys, how='inner')
+    res =  calls.join(puts, on=on_keys, how='inner')
+    if pandas_interface:
+        return res.to_pandas()
+    return res
 
-def pcp_breaking(opt_df):
-    # c - p = f - k, pcpb = c-p-f+k
+def pcp_breaking_pandas(
+    opt_df,
+    cost_per_notional=0.003,
+    abs_cost=0,
+    fut_mgn_rate=0.2,
+    short_put_mgn_rate=0.5,
+    short_call_mgn_rate=0.5,
+):
+    assert isinstance(opt_df, pd.DataFrame)
+    df = opt_df.loc[~opt_df.fut_exp.isna()]
+
+    df['index'] = (df['spot_ask_price'] + df['spot_bid_price']) / 2
+    df['call_ask_price_xS'] = df['call_ask_price'] * df['spot_ask_price']
+    df['call_bid_price_xS'] = df['call_bid_price'] * df['spot_bid_price']
+    df['put_ask_price_xS'] = df['put_ask_price'] * df['spot_ask_price']
+    df['put_bid_price_xS'] = df['put_bid_price'] * df['spot_bid_price']
+
+    r = 0.05
+    contract_size = 0.01
+    df['tte'] = (df['exp'] - df['ts']) / pd.Timedelta('365 days')
+    dscnt = np.exp(-r * df['tte'])
+
+    df['pcpb_forward'] = ((
+        df['call_bid_price_xS']
+        - df['put_ask_price_xS']
+        - (df['fut_ask_price'] - df['strike']) * dscnt
+    ) * contract_size)
+
+    df['pcpb_backward'] = (-1 * (
+        df['call_ask_price_xS']
+        - df['put_bid_price_xS']
+        - (df['fut_bid_price'] - df['strike']) * dscnt
+    ) * contract_size)
+
+    cost = df['index'].abs() * cost_per_notional * contract_size
+
+    df['cost'] = cost
+
+    df['capital_fwd'] = (
+        df['index'] * fut_mgn_rate
+        + df['index'] * short_call_mgn_rate
+        + df['call_bid_price_xS']
+        - df['put_ask_price_xS']
+    ).clip(lower=0) * contract_size
+    df['capital_bck'] = (
+        df['index'] * fut_mgn_rate
+        + df['strike'] * short_put_mgn_rate
+        + df['put_bid_price_xS']
+        - df['call_ask_price_xS']
+    ).clip(lower=0) * contract_size
+
+    df['pcpb_fwd_real'] = (df['pcpb_forward'] - cost).clip(lower=0)
+    df['pcpb_bck_real'] = (df['pcpb_backward'] - cost).clip(lower=0)
+
+    df['pcpb_fwd_real_rel'] = df['pcpb_fwd_real'] / df['capital_fwd']
+    df['pcpb_bck_real_rel'] = df['pcpb_bck_real'] / df['capital_bck']
+
+    df['pcpb_fwd_rel'] = (df['pcpb_forward'] / df['capital_fwd']).clip(lower=0)
+    df['pcpb_bck_rel'] = (df['pcpb_backward'] / df['capital_bck']).clip(lower=0)
+
+    df['pcpb_fwd_ann'] = df['pcpb_fwd_rel'] / df['tte']
+    df['pcpb_bck_ann'] = df['pcpb_bck_rel'] / df['tte']
+
+    df['pcpb_fwd_real_ann'] = df['pcpb_fwd_real_rel'] / df['tte']
+    df['pcpb_bck_real_ann'] = df['pcpb_bck_real_rel'] / df['tte']
+
+    df['put_opt_spread_bp'] = (df['put_ask_price_xS'] - df['put_bid_price_xS']) / (contract_size * df['index']) * 10000
+    df['call_opt_spread_bp'] = (df['call_ask_price_xS'] - df['call_bid_price_xS']) / (contract_size * df['index']) * 1000
+    df['bigger_opt_spread_bp'] = np.maximum(df.put_opt_spread_bp, df.call_opt_spread_bp)
+
+    df['amu_bp'] = ((np.maximum(df['pcpb_forward'], df['pcpb_backward'])- cost)
+                    / (contract_size * df['index']) * 10000 + df['bigger_opt_spread_bp'])
+
+    return df
+
+def pcp_breaking_polars(
+    opt_df,
+    cost_per_notional=0.003,
+    abs_cost=0,
+    fut_mgn_rate=0.2,
+    short_put_mgn_rate=0.5,
+    short_call_mgn_rate=0.5,
+):
+    pandas_interface = False
+    if isinstance(opt_df, pd.DataFrame):
+        pandas_interface = True
+        opt_df = pl.from_pandas(opt_df)
+
     df = opt_df.filter(pl.col('fut_exp').is_not_null())
-    df = align_calls_puts(df)
-    fut_ask_price = pl.col('fut_ask_price')
-    fut_bid_price = pl.col('fut_bid_price')
+
     spot_ask_price = pl.col('spot_ask_price')
     spot_bid_price = pl.col('spot_bid_price')
-    call_ask_price = pl.col('call_ask_price') * fut_bid_price
-    call_bid_price = pl.col('call_bid_price') * fut_ask_price
-    put_ask_price = pl.col('put_ask_price') * fut_ask_price
-    put_bid_price = pl.col('put_bid_price') * fut_bid_price
+    call_ask_price = pl.col('call_ask_price')
+    call_bid_price = pl.col('call_bid_price')
+    put_ask_price = pl.col('put_ask_price')
+    put_bid_price = pl.col('put_bid_price')
+    fut_ask_price = pl.col('fut_ask_price')
+    fut_bid_price = pl.col('fut_bid_price')
     strike = pl.col('strike')
-    df = df.with_columns([
-        (call_ask_price - put_bid_price - fut_bid_price + strike).alias('pcpb_forward'),
-        (call_bid_price - put_ask_price - fut_ask_price + strike).alias('pcpb_backward')
-    ])
+
+    index = (spot_ask_price + spot_bid_price) / 2
+    call_ask_price_xS = (call_ask_price * spot_ask_price).alias('call_ask_price_xS')
+    call_bid_price_xS = (call_bid_price * spot_bid_price).alias('call_bid_price_xS')
+    put_ask_price_xS = (put_ask_price * spot_ask_price).alias('put_ask_price_xS')
+    put_bid_price_xS = (put_bid_price * spot_bid_price).alias('put_bid_price_xS')
+
+    r = 0.05
+    contract_size = 0.01
+    tte = ((pl.col('exp') - pl.col('ts')) / pl.duration(days=365)).alias('tte')
+    dscnt = (-(r) * tte).exp()
+
+    pcpb_forward = (
+        (call_bid_price_xS - put_ask_price_xS - (fut_ask_price - strike) * dscnt)
+        * contract_size
+    ).clip(lower_bound=0).alias('pcpb_forward')
+
+    pcpb_backward = (
+        (call_ask_price_xS - put_bid_price_xS - (fut_bid_price - strike) * dscnt)
+        * contract_size
+        * -1
+    ).clip(lower_bound=0).alias('pcpb_backward')
+
+    cost = (index.abs() * cost_per_notional * contract_size).alias('cost')
+
+    capital_fwd = (
+        (index * fut_mgn_rate)
+        + (index * short_call_mgn_rate)
+        + (call_bid_price_xS - put_ask_price_xS)
+    ).clip(lower_bound=0) * contract_size
+
+    capital_bck = (
+        (index * fut_mgn_rate)
+        + (strike * short_put_mgn_rate)
+        + (put_bid_price_xS - call_ask_price_xS)
+    ).clip(lower_bound=0) * contract_size
+
+    def _min0(pl_col):
+        return pl.when(pl_col > 0).then(pl_col).otherwise(0)
+
+    pcpb_fwd_real = _min0(pcpb_forward - cost).alias('pcpb_fwd_real')
+    pcpb_bck_real = _min0(pcpb_backward - cost).alias('pcpb_bck_real')
+
+    pcpb_fwd_real_rel = (pcpb_fwd_real / capital_fwd).alias('pcpb_fwd_real_rel')
+    pcpb_bck_real_rel = (pcpb_bck_real / capital_bck).alias('pcpb_bck_real_rel')
+
+    pcpb_fwd_rel = (pcpb_forward / capital_fwd).alias('pcpb_fwd_rel')
+    pcpb_bck_rel = (pcpb_backward / capital_bck).alias('pcpb_bck_rel')
+
+    pcpb_fwd_ann = (pcpb_fwd_rel / tte).alias('pcpb_fwd_ann')
+    pcpb_bck_ann = (pcpb_bck_rel / tte).alias('pcpb_bck_ann')
+
+    pcpb_fwd_real_ann = (pcpb_fwd_real_rel / tte).alias('pcpb_fwd_real_ann')
+    pcpb_bck_real_ann = (pcpb_bck_real_rel / tte).alias('pcpb_bck_real_ann')
+
+    bigger_opt_spread = (
+        pl.max_horizontal(
+            (put_ask_price_xS - put_bid_price_xS),
+            (call_ask_price_xS - call_bid_price_xS),
+        )
+        * contract_size
+    ).alias('bigger_opt_spread')
+
+    amu = (pl.max_horizontal(pcpb_forward, pcpb_backward) + bigger_opt_spread).alias('amu')
+
+    df = df.with_columns(
+        [
+            index.alias('index'),
+            call_ask_price_xS,
+            call_bid_price_xS,
+            put_ask_price_xS,
+            put_bid_price_xS,
+            tte,
+            pcpb_forward,
+            pcpb_backward,
+            cost,
+            capital_fwd.alias('capital_fwd'),
+            capital_bck.alias('capital_bck'),
+            pcpb_fwd_real,
+            pcpb_bck_real,
+            pcpb_fwd_real_rel,
+            pcpb_bck_real_rel,
+            pcpb_fwd_rel,
+            pcpb_bck_rel,
+            pcpb_fwd_ann,
+            pcpb_bck_ann,
+            pcpb_fwd_real_ann,
+            pcpb_bck_real_ann,
+            bigger_opt_spread,
+            amu,
+        ]
+    )
+
+    if pandas_interface:
+        return df.to_pandas()
     return df
+
+
+
 
 
 def mark_up_with_futures(resampled_df, ref_syms=['BTC-USD','ETH-USD']):
@@ -386,7 +572,7 @@ def cleanup_daily_files(dayinfo):
     fnames += [_corresponding_csv(fn) for fn in fnames]
     for fn in fnames:
         Path(fn).unlink(missing_ok=True)
-    return 
+    return
 
 @dataclass(frozen=False, slots=False)
 class DayInfo:
@@ -560,6 +746,7 @@ def download_multiple_csvs(fr='2025-01-02', cleanup=False):
         opt_symbols = (
             pl.scan_parquet(opt_quotes_fname)
               .select(pl.col("symbol"))
+
               .unique()
               .collect(streaming=True)     # keep memory down
               .get_column("symbol")
@@ -659,7 +846,7 @@ def download_single_csv(ex, dt, fr, to, sym, cleanup=False):
 #         return pq_fname
 
 #     if not os.path.exists(pq_fname):
-        
+
 #         logger.info(f'Downloading {csv_fname}')
 #         datasets.download(
 #             exchange=ex,
@@ -689,19 +876,31 @@ def download_single_csv(ex, dt, fr, to, sym, cleanup=False):
 
 #     return pq_fname
 
+def explore(day='2026-01-01'):
+    # read the prepared data
+    resampled_df = merge_data(day, freq='1min', output_tag='test',
+                              force_reload=False, cleanup=False)
+    opt_df, fut_df = mark_up_with_futures(resampled_df)
+    opt_df_aligned = align_calls_puts(opt_df)
+    return opt_df_aligned.to_pandas(), fut_df.to_pandas()
+
+
 def main(fr='2026-01-01', to=None, cleanup=False, output_tag='test', force_reload=False):
     if to is None:
         to = fr
     pcpbs = []
     for day in pd.date_range(fr, to, freq='1D'):
 
-        resampled_df = merge_data(day, freq='1min', output_tag=output_tag,
+        resampled_df = merge_data(day, freq='1min', output_tag='prod',
                         force_reload=force_reload, cleanup=cleanup)
         opt_df, fut_df = mark_up_with_futures(resampled_df)
-        pcpb = pcp_breaking(opt_df)
+        opt_df_aligned = align_calls_puts(opt_df)
+        pcpb = pcp_breaking(opt_df_aligned)
         pcpb.write_parquet(f'{datadir}/pcpb_{output_tag}_{day.date()}.parquet')
-        print(pcpb.to_pandas())
-        #pcpbs.append(pcpb)
+        #print(pcpb.to_pandas())
+        pcpbs.append(pcpb)
+    if len(pcpbs) == 1:
+        return pcpbs[0]
     return pcpbs
 
 if __name__ == '__main__':
@@ -715,4 +914,4 @@ if __name__ == '__main__':
         to = None
 
     print(day)
-    main(day, to, cleanup=True, output_tag='prod')
+    main(day, to, cleanup=False, output_tag='test')
