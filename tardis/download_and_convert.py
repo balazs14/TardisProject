@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import pickle
@@ -984,99 +985,114 @@ def testme():
     print(paths)
 
 
-def resample(input_parquet_file, freq='1min', to=None, output_cols=[], summed_cols=[],
-              output_tag='', force_reload=False, cleanup_intermediate_parquet=False):
-    '''
-    merge_data only deals with a single day (fr), the to argument only serves to
-    cut the day sort for testing
-    '''
-    input_path = Path(input_parquet_file)
-    polars_freq = _normalize_polars_freq(freq)
-    invalid_summed_cols = [c for c in summed_cols if c not in output_cols]
-    if invalid_summed_cols:
-        raise ValueError(f"summed_cols must be a subset of output_cols, invalid: {invalid_summed_cols}")
-    last_cols = [c for c in output_cols if c not in summed_cols]
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Download Tardis CSV data and convert it to parquet."
+    )
+    parser.add_argument(
+        "--exchange",
+        required=True,
+        help="Exchange name (e.g. deribit, okex, binance)",
+    )
+    parser.add_argument(
+        "--data-type",
+        required=True,
+        dest="data_type",
+        help="Tardis data type (e.g. trades, quotes, options_chain)",
+    )
+    parser.add_argument(
+        "--symbol",
+        required=True,
+        help="Instrument symbol in exchange notation",
+    )
+    parser.add_argument(
+        "--start-date",
+        required=True,
+        dest="start_date",
+        help="Inclusive start date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--end-date",
+        required=True,
+        dest="end_date",
+        help="Inclusive end date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=".",
+        help="Directory where files are downloaded and stored (default: current directory)",
+    )
+    parser.add_argument(
+        "--force-reload",
+        action="store_true",
+        help="Force conversion even if target parquet already exists",
+    )
+    parser.add_argument(
+        "--cleanup-csv",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Remove source CSV files after conversion (default: enabled)",
+    )
+    parser.add_argument(
+        "--resample-freq",
+        default=None,
+        help="Optional resample frequency before parquet write (e.g. 1min, 5min)",
+    )
+    parser.add_argument(
+        "--loglevel",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Global logging level (default: INFO)",
+    )
+    return parser
 
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input parquet not found: {input_path}")
 
-    output_path = input_path.with_name(f"{input_path.stem}_{output_tag}{freq}.parquet")
-    if not force_reload and os.path.exists(output_path):
-        return pl.read_parquet(output_path)
+def _set_global_loglevel(loglevel: str) -> None:
+    level = getattr(logging, loglevel.upper(), None)
+    if not isinstance(level, int):
+        raise ValueError(f"Invalid log level: {loglevel}")
 
-    tscol = 'timestamp'
-    chunksize = 1_500_000
-    chunks = []
-    for chunk in _iter_parquet_chunks(input_path, chunk_size=chunksize):
-        assert tscol in chunk.columns, f"Column '{tscol}' not found in chunk"
-        assert 'symbol' in chunk.columns, f"Column 'symbol' not found in chunk"
-        if chunk.schema[tscol] in (pl.Int64, pl.Int32, pl.UInt64, pl.UInt32):
-            chunk = chunk.with_columns(pl.from_epoch(pl.col(tscol), time_unit=TIMESTAMP_UNIT).alias(tscol))
-        else:
-            chunk = chunk.with_columns(pl.col(tscol).cast(pl.Datetime(TIMESTAMP_UNIT)))
-        chunks.append(chunk)
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=level)
+    else:
+        root_logger.setLevel(level)
 
-    if not chunks:
-        logger.debug("No data to write.")
-        return
 
-    df = pl.concat(chunks)
-    if to is not None:
-        df = df.filter(pl.col(tscol) <= pd.Timestamp(to))
+def _main() -> None:
+    parser = _build_cli_parser()
+    args = parser.parse_args()
+    _set_global_loglevel(args.loglevel)
+    logger.info(
+        "Parsed CLI args: exchange=%s data_type=%s symbol=%s start_date=%s end_date=%s data_dir=%s force_reload=%s cleanup_csv=%s resample_freq=%s loglevel=%s",
+        args.exchange,
+        args.data_type,
+        args.symbol,
+        args.start_date,
+        args.end_date,
+        args.data_dir,
+        args.force_reload,
+        args.cleanup_csv,
+        args.resample_freq,
+        args.loglevel,
+    )
+    
+    paths = download_and_convert(
+        exchange=args.exchange,
+        data_type=args.data_type,
+        symbol=args.symbol,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        data_dir=args.data_dir,
+        force_reload=args.force_reload,
+        cleanup_csv=args.cleanup_csv,
+        resample_freq=args.resample_freq,
+    )
+    for path in paths:
+        print(path)
 
-    symbol_frames = []
-    for symbol, sdf in df.partition_by('symbol', as_dict=True).items():
-        sym = symbol[0] if isinstance(symbol, tuple) else symbol
-        ts_min = pd.Timestamp(sdf.select(tscol).min().item())
-        ts_max = pd.Timestamp(sdf.select(tscol).max().item())
-        t_start = ts_min.floor(freq)
-        t_end = ts_max.floor(freq)
 
-        grid_df = pl.DataFrame(
-            {tscol: pl.Series(pd.date_range(t_start, t_end, freq=freq)).cast(pl.Datetime(TIMESTAMP_UNIT))}
-        )
-        res = grid_df
+if __name__ == "__main__":
+    _main()
 
-        bucketed = sdf.with_columns(pl.col(tscol).dt.truncate(polars_freq).alias('_bucket_ts'))
-
-        if last_cols:
-            df_last = (
-                bucketed.group_by('_bucket_ts')
-                .agg([pl.col(c).last().alias(c) for c in last_cols])
-                .rename({'_bucket_ts': tscol})
-                .sort(tscol)
-            )
-            res = res.join(df_last, on=tscol, how='left')
-            res = res.with_columns([pl.col(c).fill_null(strategy='forward').alias(c) for c in last_cols])
-
-        if summed_cols:
-            df_sum = (
-                bucketed.group_by('_bucket_ts')
-                .agg([pl.col(c).sum().alias(c) for c in summed_cols])
-                .rename({'_bucket_ts': tscol})
-                .sort(tscol)
-            )
-            res = res.join(df_sum, on=tscol, how='left')
-
-        missing_cols = [c for c in output_cols if c not in res.columns]
-        if missing_cols:
-            res = res.with_columns([pl.lit(None, dtype=TARDIS_COLUMN_TYPES.get(c, pl.Float64)).alias(c) for c in missing_cols])
-
-        res = res.with_columns(pl.lit(sym).alias('symbol'))
-        res = res.select([tscol, 'symbol'] + output_cols)
-        symbol_frames.append(res)
-
-    if not symbol_frames:
-        logger.debug("No data to write.")
-        return
-
-    final_df = pl.concat(symbol_frames)
-    final_df = final_df.unique(subset=[tscol, 'symbol'], keep='last').sort(['symbol', tscol])
-
-    if cleanup_intermediate_parquet:
-        input_path.unlink(missing_ok=True)
-
-    final_df.write_parquet(output_path)
-    logger.debug(f"Wrote {len(final_df)} total rows to {output_path}")
-    return final_df
 

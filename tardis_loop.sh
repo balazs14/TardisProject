@@ -5,9 +5,9 @@ for day in $(python3 - << 'EOF'
 from datetime import date, timedelta
 import pandas as pd
 
-start = date(2020, 1, 1)
+start = date(2024, 1, 1)
 d = date(2026, 3, 14)
-d = (pd.Timestamp.now() - pd.Timedelta("1day")).date() 
+d = (pd.Timestamp.now() - pd.Timedelta("7day")).date() 
 while d > start:
     print(d.isoformat())
     d -= timedelta(days=1)
