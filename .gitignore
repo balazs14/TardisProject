@@ -24,3 +24,4 @@ tardis/lib/okex-options_quotes_2025-11-01_OPTIONS.csv.gz
 tardis/lib/okex-options_quotes_2025-11-01_OPTIONS.parquet
 tmp
 tmp.parquet
+.pytest_cache/
