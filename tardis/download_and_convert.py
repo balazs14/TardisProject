@@ -1,10 +1,10 @@
 import argparse
 import logging
 import os
+import resource
 import pickle
 import csv
 import gzip
-import io
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
@@ -255,7 +255,18 @@ def _cast_temporal_fallback_columns(df: pl.DataFrame, column_types: dict[str, pa
     return df.with_columns(cast_exprs)
 
 
-def _parse_stream_timestamp(raw_ts: str) -> pd.Timestamp:
+def _parse_stream_timestamp(raw_ts) -> pd.Timestamp:
+    if isinstance(raw_ts, (int, float)):
+        iv = int(raw_ts)
+        n = len(str(iv))
+        if n >= 19:
+            return pd.to_datetime(iv, unit="ns")
+        if n >= 16:
+            return pd.to_datetime(iv, unit="us")
+        if n >= 13:
+            return pd.to_datetime(iv, unit="ms")
+        return pd.to_datetime(iv, unit="s")
+
     raw_ts = (raw_ts or "").strip()
     if not raw_ts:
         raise ValueError("Empty timestamp")
@@ -277,7 +288,11 @@ def _parse_stream_timestamp(raw_ts: str) -> pd.Timestamp:
     return ts
 
 
-def _parse_stream_value(col: str, raw_val: str):
+def _parse_stream_value(col: str, raw_val):
+    if isinstance(raw_val, float) and pd.isna(raw_val):
+        return None
+    if not isinstance(raw_val, str):
+        return raw_val
     raw_val = (raw_val or "").strip()
     if raw_val in {"", "null", "None", "NULL", "NaN", "nan"}:
         return None
@@ -314,16 +329,35 @@ def _tardis_csv_url(exchange: str, data_type: str, day: pd.Timestamp, symbol: st
     )
 
 
-def _iter_tardis_csv_rows_streaming(url: str, api_key: str | None):
+def _iter_tardis_csv_rows_streaming(
+    url: str,
+    api_key: str | None,
+    chunk_size: int = 100_000,
+    block_size: int = 8 * 1024 * 1024,
+):
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    block_size = max(block_size, chunk_size * 256)
+    read_options = pv.ReadOptions(block_size=block_size)
+    # The HTTP+gzip stream is not seekable, so we cannot safely "retry" parsing
+    # from the start after a conversion failure. Parse temporal columns as int64
+    # up front, then cast to timestamps/dates in Polars below.
+    convert_options = pv.ConvertOptions(
+        column_types=_temporal_fallback_column_types(TARDIS_COLUMN_TYPES),
+        null_values=["", "null", "None", "NULL", "NaN", "nan"],
+    )
+
     with requests.get(url, headers=headers, stream=True, timeout=120) as response:
         response.raise_for_status()
         response.raw.decode_content = True
         with gzip.GzipFile(fileobj=response.raw) as gz:
-            with io.TextIOWrapper(gz, encoding="utf-8", newline="") as text_stream:
-                reader = csv.DictReader(text_stream)
-                for row in reader:
-                    yield row
+            reader = pv.open_csv(gz, read_options=read_options, convert_options=convert_options)
+            try:
+                for batch in reader:
+                    df = pl.from_arrow(pa.Table.from_batches([batch]))
+                    df = _cast_temporal_fallback_columns(df, TARDIS_COLUMN_TYPES)
+                    yield df
+            finally:
+                reader.close()
 
 
 def _iter_parquet_chunks(path: Path, chunk_size: int = 500_000):
@@ -366,6 +400,7 @@ def download_and_convert_streaming_resample(
     start_date: str,
     end_date: str,
     data_dir: str = ".",
+    cleanup_csv = "ignored",
     force_reload: bool = False,
     resample_freq: str = "1min",
 ) -> List[Path]:
@@ -402,113 +437,46 @@ def download_and_convert_streaming_resample(
         url = _tardis_csv_url(exchange=exchange, data_type=data_type, day=day, symbol=symbol)
         logger.info("Streaming download+resample from %s", url)
 
-        emitted_rows: list[dict[str, object]] = []
-        per_symbol_state: dict[str, _OnlineResampleState] = {}
-        last_cols: list[str] | None = None
-        summed_cols: list[str] | None = None
-        include_stale = False
-
         try:
-            for row in _iter_tardis_csv_rows_streaming(url, api_key=api_key):
-                if last_cols is None or summed_cols is None:
-                    cols = list(row.keys())
-                    _, last_cols, summed_cols = _resample_column_sets(cols, tscol="timestamp")
-                    include_stale = ("bid_price" in cols) or ("ask_price" in cols)
-
-                ts_raw = row.get("timestamp")
-                sym = row.get("symbol")
-                if not ts_raw or not sym:
-                    continue
-
-                ts = _parse_stream_timestamp(ts_raw)
-                bucket = ts.floor(resample_freq)
-
-                state = per_symbol_state.setdefault(sym, _OnlineResampleState())
-                if state.current_bucket is None:
-                    state.current_bucket = bucket
-                    state.sum_vals = {}
-                    state.last_vals = {}
-                    state.bid_updated = False
-                    state.ask_updated = False
-
-                if bucket < state.current_bucket:
-                    logger.warning(
-                        "Out-of-order row encountered for %s at %s (< %s); skipping row",
-                        sym,
-                        bucket,
-                        state.current_bucket,
-                    )
-                    continue
-
-                if bucket > state.current_bucket:
-                    # Finalize current bucket.
-                    emitted_rows.append(
-                        _online_finalize_bucket_row(
-                            symbol=sym,
-                            bucket=state.current_bucket,
-                            state=state,
-                            last_cols=last_cols,
-                            summed_cols=summed_cols,
-                            include_stale=include_stale,
-                        )
-                    )
-
-                    # Emit empty gap buckets with forward-filled "last" columns.
-                    gap_bucket = state.current_bucket + offset
-                    while gap_bucket < bucket:
-                        gap_row = {"timestamp": gap_bucket, "symbol": sym}
-                        for c in summed_cols:
-                            gap_row[c] = None
-                        for c in last_cols:
-                            gap_row[c] = state.last_emitted_last_vals.get(c)
-                        if include_stale:
-                            gap_row["stale"] = True
-                        emitted_rows.append(gap_row)
-                        state.last_emitted_bucket = gap_bucket
-                        gap_bucket = gap_bucket + offset
-
-                    # Reset for next bucket.
-                    state.current_bucket = bucket
-                    state.sum_vals = {}
-                    state.last_vals = {}
-                    state.bid_updated = False
-                    state.ask_updated = False
-
-                # Accumulate this row into current bucket.
-                for c in last_cols:
-                    state.last_vals[c] = _parse_stream_value(c, row.get(c, ""))
-
-                for c in summed_cols:
-                    v = _parse_stream_value(c, row.get(c, ""))
-                    if v is None:
-                        continue
-                    try:
-                        fv = float(v)
-                    except (TypeError, ValueError):
-                        continue
-                    state.sum_vals[c] = state.sum_vals.get(c, 0.0) + fv
-
-                bid_val = _parse_stream_value("bid_price", row.get("bid_price", ""))
-                ask_val = _parse_stream_value("ask_price", row.get("ask_price", ""))
-                if bid_val is not None:
-                    state.bid_updated = True
-                if ask_val is not None:
-                    state.ask_updated = True
-
-            # Flush final open bucket per symbol.
-            for sym, state in per_symbol_state.items():
-                if state.current_bucket is None:
-                    continue
-                emitted_rows.append(
-                    _online_finalize_bucket_row(
-                        symbol=sym,
-                        bucket=state.current_bucket,
-                        state=state,
-                        last_cols=last_cols or [],
-                        summed_cols=summed_cols or [],
-                        include_stale=include_stale,
-                    )
+            resample_chunks: list[pl.DataFrame] = []
+            chunk_idx = 0
+            COMPACT_EVERY = 10  # merge accumulated chunks every N raw chunks to bound memory
+            for chunk_df in _iter_tardis_csv_rows_streaming(url, api_key=api_key):
+                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                last_ts = chunk_df["timestamp"][-1] if "timestamp" in chunk_df.columns else None
+                logger.debug(
+                    "chunk %d: raw rows=%d cols=%d  last_ts=%s  rss=%.1f MB",
+                    chunk_idx, chunk_df.height, chunk_df.width, last_ts, rss_mb,
                 )
+                pldf = _cast_temporal_fallback_columns(chunk_df, TARDIS_COLUMN_TYPES)
+                if pldf.schema.get("timestamp") != pl.Datetime(TIMESTAMP_UNIT):
+                    pldf = pldf.with_columns(pl.col("timestamp").cast(pl.Datetime(TIMESTAMP_UNIT)))
+                agg = _aggregate_resample_chunk(pldf, freq=resample_freq, tscol="timestamp")
+                if not agg.is_empty():
+                    resample_chunks.append(agg)
+                rss_mb_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                logger.debug(
+                    "chunk %d: agg rows=%d  chunks_so_far=%d  rss=%.1f MB (+%.1f MB)",
+                    chunk_idx, agg.height, len(resample_chunks), rss_mb_after, rss_mb_after - rss_mb,
+                )
+                # Periodically compact accumulated chunks to bound memory growth.
+                if len(resample_chunks) >= COMPACT_EVERY:
+                    merged = _merge_resample_aggregates(
+                        pl.concat(resample_chunks, rechunk=False), tscol="timestamp"
+                    )
+                    merged_last_ts = (
+                        merged.select(pl.col("timestamp").max()).item()
+                        if not merged.is_empty()
+                        else None
+                    )
+                    logger.info("merged(last compact) timestamp=%s", merged_last_ts)
+                    rss_mb_compact = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                    logger.debug(
+                        "chunk %d: compacted %d chunks → %d rows  rss=%.1f MB",
+                        chunk_idx, len(resample_chunks), merged.height, rss_mb_compact,
+                    )
+                    resample_chunks = [merged]
+                chunk_idx += 1
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 logger.warning("No dataset found for %s (HTTP 404)", url)
@@ -516,15 +484,31 @@ def download_and_convert_streaming_resample(
                 continue
             raise
 
-        if not emitted_rows:
+        if not resample_chunks:
             pl.DataFrame().write_parquet(parquet_path)
             logger.info("Wrote empty parquet %s", parquet_path)
             continue
 
-        final_df = pl.DataFrame(emitted_rows, strict=False).sort(["symbol", "timestamp"])
-        final_df = _cast_temporal_fallback_columns(final_df, TARDIS_COLUMN_TYPES)
-        if final_df.schema.get("timestamp") != pl.Datetime(TIMESTAMP_UNIT):
-            final_df = final_df.with_columns(pl.col("timestamp").cast(pl.Datetime(TIMESTAMP_UNIT)))
+        combined = pl.concat(resample_chunks, rechunk=False)
+        logger.debug(
+            "post-concat: %d chunks → %d rows  rss=%.1f MB",
+            len(resample_chunks), combined.height,
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+        )
+        del resample_chunks
+        combined = _merge_resample_aggregates(combined, tscol="timestamp")
+        logger.debug(
+            "post-merge: %d rows  rss=%.1f MB",
+            combined.height, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+        )
+        final_df = _expand_resampled_buckets(combined, freq=resample_freq, tscol="timestamp")
+        del combined
+        logger.debug(
+            "post-expand: %d rows  rss=%.1f MB",
+            final_df.height, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+        )
+        # Sort columns alphabetically to match batch output
+        final_df = final_df.select(sorted(final_df.columns))
         final_df.write_parquet(parquet_path)
         logger.debug(f'wrote {parquet_path}')
 
@@ -830,6 +814,8 @@ def _convert_csv_to_parquet(
             combined = pl.concat(resample_chunks, rechunk=False)
             combined = _merge_resample_aggregates(combined, tscol="timestamp")
             final_df = _expand_resampled_buckets(combined, freq=resample_freq, tscol="timestamp")
+            # Sort columns alphabetically to match streaming output
+            final_df = final_df.select(sorted(final_df.columns))
             final_df.write_parquet(parquet_path)
             logger.debug(f'wrote {parquet_path} (resample_chunks)')
         else:
@@ -1044,6 +1030,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Global logging level (default: INFO)",
     )
+    parser.add_argument(
+        "--use-streaming",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the streaming implementation (default: enabled)",
+    )
     return parser
 
 
@@ -1052,11 +1044,15 @@ def _set_global_loglevel(loglevel: str) -> None:
     if not isinstance(level, int):
         raise ValueError(f"Invalid log level: {loglevel}")
 
+    log_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
     root_logger = logging.getLogger()
     if not root_logger.handlers:
-        logging.basicConfig(level=level)
+        logging.basicConfig(level=level, format=log_format, datefmt=date_format)
     else:
         root_logger.setLevel(level)
+        for handler in root_logger.handlers:
+            handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
 
 
 def _main() -> None:
@@ -1064,7 +1060,9 @@ def _main() -> None:
     args = parser.parse_args()
     _set_global_loglevel(args.loglevel)
     logger.info(
-        "Parsed CLI args: exchange=%s data_type=%s symbol=%s start_date=%s end_date=%s data_dir=%s force_reload=%s cleanup_csv=%s resample_freq=%s loglevel=%s",
+        "Parsed CLI args: exchange=%s data_type=%s symbol=%s"
+        " start_date=%s end_date=%s data_dir=%s force_reload=%s"
+        " cleanup_csv=%s resample_freq=%s loglevel=%s use_streaming=%s",
         args.exchange,
         args.data_type,
         args.symbol,
@@ -1075,9 +1073,12 @@ def _main() -> None:
         args.cleanup_csv,
         args.resample_freq,
         args.loglevel,
+        args.use_streaming,
     )
     
-    paths = download_and_convert(
+    fun = download_and_convert_streaming_resample if args.use_streaming else download_and_convert
+
+    paths = fun(
         exchange=args.exchange,
         data_type=args.data_type,
         symbol=args.symbol,

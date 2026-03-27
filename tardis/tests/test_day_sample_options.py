@@ -14,15 +14,15 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
     quote_path = tmp_path / f"{exchange}_quotes_{day}_{symbol}_5min.parquet"
     pl.DataFrame({"symbol": [symbol], "timestamp": [1]}).write_parquet(quote_path)
 
-    monkeypatch.setattr(
-        dso,
-        "EXCHANGE_DOWNLOADS",
-        {
-            exchange: {
-                "static": [(exchange, "quotes", symbol)],
-            }
-        },
-    )
+    # monkeypatch.setattr(
+    #     dso,
+    #     "EXCHANGE_DOWNLOADS",
+    #     {
+    #         exchange: {
+    #             "static": [(exchange, "quotes", symbol)],
+    #         }
+    #     },
+    # )
 
     calls: dict[str, object] = {}
 
@@ -76,7 +76,7 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
         cleanup_intermediate_parquet=False,
     )
 
-    out = dso.sample_day_options(day=day, exchange=exchange, config=config)
+    out = dso.day_sample(day=day, exchange=exchange, config=config)
 
     assert calls["download_resample_freq"] == "5min"
     assert calls["post_resample_freq"] == "15min"

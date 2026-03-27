@@ -1,7 +1,7 @@
 import sys
 sys.path.append('/my/TardisProject')
 
-from tardis.day_sample_options import sample_day_options, SampleConfig
+from tardis.day_sample_options import day_sample, SampleConfig
 from tardis.pcp_metrics import compute_pcp_metrics
 from tardis.implied_vol import compute_black_implied_vols
 import logging
@@ -32,7 +32,7 @@ def _configure_logging(level: str = "ERROR"):
 def one_day(day, exchange, config: SampleConfig, align_only=True):
     day_str = f'{pd.Timestamp(day).date()}'
     logger.info("one_day start exchange=%s day=%s freq=%s", exchange, day_str, config.freq)
-    raw = sample_day_options(day_str, exchange, config)
+    raw = day_sample(day_str, exchange, config)
     logger.info("one_day sampled exchange=%s day=%s rows=%d", exchange, day_str, len(raw))
     if align_only:
         out = raw
