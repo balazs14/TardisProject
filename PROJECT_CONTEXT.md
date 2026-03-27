@@ -79,6 +79,27 @@ pytest -q
 black .
 ```
 
+## Low-memory parquet zip workflow
+
+- Purpose: combine multiple `*_5min.parquet` outputs from `download_and_convert` without loading full files in memory.
+- Preferred method: out-of-core joins over parquet scans keyed by:
+  - `timestamp`
+  - `symbol`
+  - `exchange`
+- Column mapping contract:
+  - `output_col: (source_alias, source_column)`
+- New utility module:
+  - `tardis/lib/parquet_zip_join.py`
+  - provides `zip_join_parquets(...)` and inspection helpers (`parquet_columns`, `parquet_symbols`, `parquet_timestamps`, `parquet_summary`, `inspect_inputs`).
+- Example runnable config script:
+  - `zip_resampled_parquets.py`
+
+## Global implementation ground rules
+
+- Avoid boilerplate-heavy code; assume known dataset shapes and use `assert` + logging on violations.
+- Always include manual inspection helpers for input discovery (columns/symbols/timestamps).
+- Prefer readability/editability: keep each function around one screen when possible.
+
 ## Notes to keep updated
 
 When project behavior changes, update this document first in these sections:

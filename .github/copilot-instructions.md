@@ -56,3 +56,22 @@ Reference implementations:
 - Make minimal, local changes; this repo has many ad-hoc scripts with overlapping logic.
 - If you change shared pipeline behavior, run both PCP and download/convert test suites.
 - Prefer updating existing functions over introducing new abstractions unless repetition is blocking correctness.
+
+## Repo-wide workflow preferences
+
+- Prefer out-of-core joins for multi-file 5min parquet composition. Avoid loading full inputs into memory; favor scan/stream style processing.
+- For join composition utilities, use explicit key joins on `timestamp`, `symbol`, `exchange` unless task-specific logic requires otherwise.
+- Column selection/mapping should be driven by explicit dictionaries in the shape:
+  - `output_col: (source_alias, source_column)`
+- Keep utilities assertive: assume known schemas for normal operation; use `assert` plus logging for invalid input instead of generic defensive boilerplate.
+
+## Repo-wide coding style rules
+
+- No boilerplate-heavy scaffolding for data utilities.
+- Always provide helper functions to inspect inputs manually:
+  - available columns
+  - symbol list previews
+  - timestamp previews/bounds
+- Prioritize readability/editability over compact one-liners:
+  - keep functions short enough to fit roughly one screen
+  - keep control flow explicit and easy to modify
