@@ -2,7 +2,6 @@ import argparse
 import logging
 import os
 import resource
-import pickle
 import csv
 import gzip
 from dataclasses import dataclass, field
@@ -22,14 +21,6 @@ logger = logging.getLogger(__name__)
 
 # Use microsecond resolution for all timestamps
 TIMESTAMP_UNIT = 'us'
-
-@dataclass
-class Metadata:
-    symbols: list[str]
-    symbol_timestamp_bounds: dict[str, tuple[pd.Timestamp, pd.Timestamp]]
-    global_first_timestamp: pd.Timestamp | None
-    global_last_timestamp: pd.Timestamp | None
-    extras: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -512,29 +503,6 @@ def download_and_convert_streaming_resample(
         final_df.write_parquet(parquet_path)
         logger.debug(f'wrote {parquet_path}')
 
-        # Write compact metadata sidecar for parity with batch path.
-        symbol_timestamp_bounds: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
-        grouped = final_df.group_by("symbol").agg([
-            pl.col("timestamp").min().alias("min_ts"),
-            pl.col("timestamp").max().alias("max_ts"),
-        ])
-        for r in grouped.iter_rows(named=True):
-            symbol_timestamp_bounds[r["symbol"]] = (pd.Timestamp(r["min_ts"]), pd.Timestamp(r["max_ts"]))
-
-        global_first = pd.Timestamp(final_df.select(pl.col("timestamp").min()).item())
-        global_last = pd.Timestamp(final_df.select(pl.col("timestamp").max()).item())
-        metadata = Metadata(
-            symbols=sorted(symbol_timestamp_bounds.keys()),
-            symbol_timestamp_bounds=symbol_timestamp_bounds,
-            global_first_timestamp=global_first,
-            global_last_timestamp=global_last,
-            extras={"resample_freq": resample_freq, "streaming": True},
-        )
-        metadata_path = Path(str(parquet_path) + ".pkl")
-        with metadata_path.open("wb") as handle:
-            pickle.dump(metadata, handle)
-            logger.debug(f'wrote {metadata_path}')
-
         logger.info("Finished streaming convert+resample %s", parquet_path)
 
     return parquet_paths
@@ -731,10 +699,6 @@ def _convert_csv_to_parquet(
         timestamps_read_as_int = True
 
     writer = None
-    metadata_path = Path(str(parquet_path) + ".pkl")
-    symbol_timestamp_bounds: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
-    global_first_timestamp: pd.Timestamp | None = None
-    global_last_timestamp: pd.Timestamp | None = None
     resample_chunks: list[pl.DataFrame] = []
 
     try:
@@ -769,40 +733,6 @@ def _convert_csv_to_parquet(
                 writer.write_table(table)
                 logger.debug(f'wrote chunk')
 
-            if "symbol" in table.schema.names and "timestamp" in table.schema.names:
-                batch_ranges = (
-                    table_df
-                    .select(["symbol", "timestamp"])
-                    .drop_nulls()
-                    .group_by("symbol")
-                    .agg(
-                        [
-                            pl.col("timestamp").min().alias("min_ts"),
-                            pl.col("timestamp").max().alias("max_ts"),
-                        ]
-                    )
-                )
-
-                for row in batch_ranges.iter_rows(named=True):
-                    symbol = row["symbol"]
-                    min_ts = pd.Timestamp(row["min_ts"])
-                    max_ts = pd.Timestamp(row["max_ts"])
-
-                    prev = symbol_timestamp_bounds.get(symbol)
-                    if prev is None:
-                        symbol_timestamp_bounds[symbol] = (min_ts, max_ts)
-                    else:
-                        symbol_timestamp_bounds[symbol] = (min(prev[0], min_ts), max(prev[1], max_ts))
-
-                    if global_first_timestamp is None:
-                        global_first_timestamp = min_ts
-                    else:
-                        global_first_timestamp = min(global_first_timestamp, min_ts)
-
-                    if global_last_timestamp is None:
-                        global_last_timestamp = max_ts
-                    else:
-                        global_last_timestamp = max(global_last_timestamp, max_ts)
     finally:
         gz_f.close()
         if writer is not None:
@@ -822,19 +752,7 @@ def _convert_csv_to_parquet(
             pl.DataFrame().write_parquet(parquet_path)
             logger.debug(f'wrote {parquet_path}')
 
-    metadata = Metadata(
-        symbols=sorted(symbol_timestamp_bounds.keys()),
-        symbol_timestamp_bounds=symbol_timestamp_bounds,
-        global_first_timestamp=global_first_timestamp,
-        global_last_timestamp=global_last_timestamp,
-        extras={"resample_freq": resample_freq} if resample_freq else {},
-    )
-    with metadata_path.open("wb") as handle:
-        pickle.dump(metadata, handle)
-        logger.debug(f'wrote {metadata_path}')
-
     logger.info("Finished converting %s", parquet_path)
-    logger.debug("Wrote parquet metadata %s", metadata_path)
     return parquet_path
 
 
