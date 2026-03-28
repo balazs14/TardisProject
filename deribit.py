@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from tardis_dev import datasets
 import glob
+import sys
+from tardis.lib.utils import _configure_logging
 
 # 1. Initialize Environment
 load_dotenv()
@@ -200,4 +202,13 @@ def run_deribit_attack(date_str='2025-12-05', freq='1min'):
         logger.info(f"SUCCESS: Analysis results saved to {out_file}")
 
 if __name__ == "__main__":
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     run_deribit_attack()

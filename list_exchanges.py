@@ -3,6 +3,8 @@ import requests
 import re
 import json
 from collections import defaultdict
+import sys
+from tardis.lib.utils import _configure_logging
 
 # Load API key from .env
 try:
@@ -144,6 +146,15 @@ def discover_pcp_triplets():
     return triplets
 
 if __name__ == "__main__":
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     pcp_triplets = discover_pcp_triplets()
     with open("pcp_triplets.json", "w") as f:
         json.dump(pcp_triplets, f, indent=2)

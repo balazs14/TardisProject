@@ -1,5 +1,6 @@
 import logging
 import warnings
+from tardis.lib.utils import _configure_logging
 warnings.simplefilter('ignore')
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -910,6 +911,15 @@ def main(fr='2026-01-01', to=None, cleanup=False, output_tag='test', force_reloa
     return pcpbs
 
 if __name__ == '__main__':
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     if len(sys.argv)>1:
         day = sys.argv[1]
     else:

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from tardis_dev import datasets
 import pandas as pd
+from tardis.lib.utils import _configure_logging
 
 
 # ---------------------------------------------------------
@@ -314,5 +315,14 @@ def analyze_day(date_str):
         logger.warning("No valid triplets found.")
 
 if __name__ == "__main__":
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     day = sys.argv[1] if len(sys.argv) > 1 else "2024-05-01"
     analyze_day(day)

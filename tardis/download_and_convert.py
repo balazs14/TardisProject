@@ -15,6 +15,8 @@ import pyarrow.csv as pv
 import pyarrow.parquet as pq
 import requests
 from tardis_dev import datasets
+import sys
+from tardis.lib.utils import _configure_logging
 
 
 logger = logging.getLogger(__name__)
@@ -341,7 +343,9 @@ def _iter_tardis_csv_rows_streaming(
         response.raise_for_status()
         response.raw.decode_content = True
         with gzip.GzipFile(fileobj=response.raw) as gz:
+            logger.warning('here1')
             reader = pv.open_csv(gz, read_options=read_options, convert_options=convert_options)
+            logger.warning('here2')
             try:
                 for batch in reader:
                     df = pl.from_arrow(pa.Table.from_batches([batch]))
@@ -433,6 +437,7 @@ def download_and_convert_streaming_resample(
             chunk_idx = 0
             COMPACT_EVERY = 10  # merge accumulated chunks every N raw chunks to bound memory
             for chunk_df in _iter_tardis_csv_rows_streaming(url, api_key=api_key):
+                print (chunk_df)
                 rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
                 last_ts = chunk_df["timestamp"][-1] if "timestamp" in chunk_df.columns else None
                 logger.debug(
@@ -442,7 +447,10 @@ def download_and_convert_streaming_resample(
                 pldf = _cast_temporal_fallback_columns(chunk_df, TARDIS_COLUMN_TYPES)
                 if pldf.schema.get("timestamp") != pl.Datetime(TIMESTAMP_UNIT):
                     pldf = pldf.with_columns(pl.col("timestamp").cast(pl.Datetime(TIMESTAMP_UNIT)))
-                agg = _aggregate_resample_chunk(pldf, freq=resample_freq, tscol="timestamp")
+                if data_type == "trades":
+                    agg = _aggregate_resample_trade_chunk(pldf, freq=resample_freq, tscol="timestamp")
+                else:
+                    agg = _aggregate_resample_chunk(pldf, freq=resample_freq, tscol="timestamp")
                 if not agg.is_empty():
                     resample_chunks.append(agg)
                 rss_mb_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
@@ -508,6 +516,45 @@ def download_and_convert_streaming_resample(
     return parquet_paths
 
 
+def peek_streaming_raw(
+    exchange: str,
+    data_type: str,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    *,
+    head_rows: int = 10,
+) -> None:
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    if end < start:
+        raise ValueError(f"end_date ({end_date}) must be >= start_date ({start_date})")
+
+    api_key = os.environ.get("TARDIS_API_KEY", None)
+    for day in pd.date_range(start, end, freq="1D"):
+        url = _tardis_csv_url(exchange=exchange, data_type=data_type, day=day, symbol=symbol)
+        logger.info("Peek streaming from %s", url)
+        try:
+            iterator = _iter_tardis_csv_rows_streaming(url, api_key=api_key)
+            first_chunk = next(iterator, None)
+            if first_chunk is None or first_chunk.is_empty():
+                logger.info("peek: no rows for %s", day.date())
+                continue
+
+            logger.info("peek: day=%s rows_in_first_chunk=%d cols=%d", day.date(), first_chunk.height, first_chunk.width)
+            logger.info("peek columns: %s", first_chunk.columns)
+            logger.info("peek inferred schema: %s", first_chunk.schema)
+            print(first_chunk.head(head_rows))
+            return
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                logger.warning("peek: no dataset found for %s (HTTP 404)", url)
+                continue
+            raise
+
+    logger.warning("peek: no available data found in requested range")
+
+
 def _resample_column_sets(columns: list[str], tscol: str = "timestamp") -> tuple[list[str], list[str], list[str]]:
     value_cols = [c for c in columns if c not in {tscol, "symbol", "_bid_updated", "_ask_updated", "stale"}]
     summed_cols = [c for c in value_cols if _aggregation_for_column(c) == "sum"]
@@ -518,7 +565,6 @@ def _resample_column_sets(columns: list[str], tscol: str = "timestamp") -> tuple
 def _aggregate_resample_chunk(df: pl.DataFrame, freq: str, tscol: str = "timestamp") -> pl.DataFrame:
     if df.is_empty():
         return df
-
     polars_freq = _normalize_polars_freq(freq)
     _, last_cols, summed_cols = _resample_column_sets(df.columns, tscol)
 
@@ -954,6 +1000,17 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         default=True,
         help="Use the streaming implementation (default: enabled)",
     )
+    parser.add_argument(
+        "--peek",
+        action="store_true",
+        help="Stream one raw chunk and print head + inferred schema, then exit",
+    )
+    parser.add_argument(
+        "--peek-rows",
+        type=int,
+        default=10,
+        help="Number of rows to print in --peek mode (default: 10)",
+    )
     return parser
 
 
@@ -980,7 +1037,8 @@ def _main() -> None:
     logger.info(
         "Parsed CLI args: exchange=%s data_type=%s symbol=%s"
         " start_date=%s end_date=%s data_dir=%s force_reload=%s"
-        " cleanup_csv=%s resample_freq=%s loglevel=%s use_streaming=%s",
+        " cleanup_csv=%s resample_freq=%s loglevel=%s use_streaming=%s"
+        " peek=%s peek_rows=%s",
         args.exchange,
         args.data_type,
         args.symbol,
@@ -992,7 +1050,20 @@ def _main() -> None:
         args.resample_freq,
         args.loglevel,
         args.use_streaming,
+        args.peek,
+        args.peek_rows,
     )
+
+    if args.peek:
+        peek_streaming_raw(
+            exchange=args.exchange,
+            data_type=args.data_type,
+            symbol=args.symbol,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            head_rows=args.peek_rows,
+        )
+        return
     
     fun = download_and_convert_streaming_resample if args.use_streaming else download_and_convert
 
@@ -1010,8 +1081,10 @@ def _main() -> None:
     for path in paths:
         print(path)
 
+def testme():
+    download_and_convert_streaming_resample('deribit','trades','OPTIONS','2026-03-26','2026-03-26',resample_freq='5min', force_reload=True)
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     _main()
 
 

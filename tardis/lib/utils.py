@@ -1,5 +1,6 @@
 from . import get_pybt_logger
 logger = get_pybt_logger(__name__)
+import logging
 import asyncio
 import functools
 import inspect
@@ -21,6 +22,18 @@ s3_bucket = 's3://to-be-determined/test'
 
 epsilon_size = 0.001        
 epsilon_vol = 0.001
+
+
+def _configure_logging(level: str = "ERROR"):
+    level_name = str(level).strip().upper()
+    numeric_level = getattr(logging, level_name, None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f"Invalid log level: {level}")
+
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 

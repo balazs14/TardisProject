@@ -1,19 +1,19 @@
 import logging
 from pathlib import Path
-
+import numpy as np
+from zmq import log
+a
 from tardis.lib.parquet_zip_join import inspect_inputs, zip_join_parquets
+import sys
+from tardis.lib.utils import _configure_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+logger = logging.getLogger(__name__)
 
 # Example: merge 5min parquets by key and keep only selected columns.
 SOURCES = {
-    "options": "datasets/deribit_chain/deribit_options_chain_2025-11-21_OPTIONS_5min.parquet",
-    "quotes": "datasets/deribit/deribit_quotes_2025-11-21_OPTIONS_5min.parquet",
-    "trades": "datasets/deribit/deribit_trades_2025-11-21_OPTIONS_5min.parquet",
+    "options": "datasets/deribit/deribit_options_chain_2026-03-26_OPTIONS_5min.parquet",
+    "quotes": "datasets/deribit/deribit_quotes_2026-03-26_OPTIONS_5min.parquet",
+    "trades": "datasets/deribit/deribit_trades_2026-03-26_OPTIONS_5min.parquet",
 }
 
 # output_col -> (source_alias, source_column)
@@ -23,14 +23,23 @@ COLUMN_MAP = {
     "opt_ask": ("options", "ask_price"),
     "q_bid": ("quotes", "bid_price"),
     "q_ask": ("quotes", "ask_price"),
-    "trade_amount": ("trades", "trade_amount"),
+    "trade_amount": None,
 }
 
-OUT = Path("datasets/deribit_chain/deribit_joined_2025-11-21_5min.parquet")
+OUT = Path("./deribit_joined_2026-03-26_5min.parquet")
 
 
 if __name__ == "__main__":
-    inspect_inputs(SOURCES, symbol_limit=20, ts_limit=20)
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
+    inspect_inputs(SOURCES, symbol_limit=2, ts_limit=2)
     zip_join_parquets(
         sources=SOURCES,
         column_map=COLUMN_MAP,

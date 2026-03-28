@@ -24,6 +24,16 @@ def _read_parquet_select(path: str | Path, cols: list[str]) -> str:
     return f"SELECT {col_sql} FROM read_parquet({_qlit(str(path))})"
 
 
+def _const_sql(value: object) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return _qlit(str(value))
+
+
 def parquet_columns(path: str | Path) -> list[str]:
     con = duckdb.connect()
     try:
@@ -87,7 +97,7 @@ def parquet_summary(path: str | Path) -> dict[str, object]:
 def inspect_inputs(
     sources: dict[str, str | Path],
     *,
-    symbol_limit: int = 25,
+    symbol_limit: int = 3,
     ts_limit: int = 25,
 ) -> dict[str, dict[str, object]]:
     report: dict[str, dict[str, object]] = {}
@@ -100,12 +110,16 @@ def inspect_inputs(
         info["timestamps_preview"] = parquet_timestamps(p, limit=ts_limit)
         report[source] = info
         logger.info(
-            "source=%s rows=%s symbols=%s ts=[%s, %s]",
+            "source=%s rows=%s symbols=%s ts=[%s, %s]"
+            "\n    columns=%s"
+            "\n    symbols_preview=%s",
             source,
             info["n_rows"],
             info["n_symbols"],
             info["min_ts"],
             info["max_ts"],
+            info['columns'],
+            info['symbols_preview'],
         )
     return report
 
@@ -113,7 +127,7 @@ def inspect_inputs(
 def zip_join_parquets(
     *,
     sources: dict[str, str | Path],
-    column_map: dict[str, tuple[str, str]],
+    column_map: dict[str, object],
     output_path: str | Path,
     join_keys: tuple[str, ...] = DEFAULT_JOIN_KEYS,
     join_type: str = "inner",
@@ -128,10 +142,15 @@ def zip_join_parquets(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     needed: dict[str, set[str]] = {src: set(join_keys) for src in sources}
-    for out_col, (src, src_col) in column_map.items():
+    source_mappings: dict[str, tuple[str, str]] = {}
+    for out_col, spec in column_map.items():
         assert out_col not in join_keys, f"output column collides with join key: {out_col}"
-        assert src in sources, f"unknown source in column_map: {src}"
-        needed[src].add(src_col)
+        if isinstance(spec, (tuple, list)):
+            assert len(spec) == 2, f"column_map[{out_col}] tuple/list must have 2 items"
+            src, src_col = spec
+            assert src in sources, f"unknown source in column_map: {src}"
+            source_mappings[out_col] = (src, src_col)
+            needed[src].add(src_col)
 
     for src, path in sources.items():
         p = Path(path)
@@ -153,14 +172,24 @@ def zip_join_parquets(
         from_sql += f" {join_type_sql} JOIN {right} ON {on_sql}"
 
     select_sql = [f"{_qident(base)}.{_qident(k)} AS {_qident(k)}" for k in join_keys]
-    select_sql += [
-        f"{_qident(src)}.{_qident(src_col)} AS {_qident(out_col)}"
-        for out_col, (src, src_col) in column_map.items()
-    ]
+    for out_col, spec in column_map.items():
+        if isinstance(spec, (tuple, list)):
+            src, src_col = source_mappings[out_col]
+            select_sql.append(f"{_qident(src)}.{_qident(src_col)} AS {_qident(out_col)}")
+        else:
+            select_sql.append(f"{_const_sql(spec)} AS {_qident(out_col)}")
+
+    order_keys = ["timestamp"]
+    if "symbol" in join_keys:
+        order_keys.append("symbol")
+    if "exchange" in join_keys:
+        order_keys.append("exchange")
+    order_sql = ", ".join(_qident(k) for k in order_keys)
 
     query = (
         f"SELECT {', '.join(select_sql)} FROM {from_sql}"
         + (f" WHERE {where_sql}" if where_sql else "")
+        + f" ORDER BY {order_sql}"
     )
     copy_sql = (
         f"COPY ({query}) TO {_qlit(str(output))} "

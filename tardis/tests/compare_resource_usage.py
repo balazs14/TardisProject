@@ -8,6 +8,8 @@ from pathlib import Path
 import pandas as pd
 
 from tardis import download_and_convert as dac
+import sys
+from tardis.lib.utils import _configure_logging
 
 def measure_disk_usage(path):
     total = 0
@@ -124,4 +126,13 @@ def main():
             print(f"Disk used: {stats['disk_used']/1024:.2f} KB")
 
 if __name__ == "__main__":
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     main()

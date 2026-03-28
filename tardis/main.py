@@ -13,21 +13,10 @@ import glob
 import pyarrow as pa
 from datetime import datetime, timedelta
 from tardis.process import compact  # noqa: F401
+from tardis.lib.utils import _configure_logging
 
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(level: str = "ERROR"):
-    level_name = str(level).strip().upper()
-    numeric_level = getattr(logging, level_name, None)
-    if not isinstance(numeric_level, int):
-        raise ValueError(f"Invalid log level: {level}")
-
-    logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
 
 def one_day(day, exchange, config: SampleConfig, align_only=True):
     day_str = f'{pd.Timestamp(day).date()}'
@@ -131,6 +120,15 @@ def _parse_bool(value):
     raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
 
 if __name__ == '__main__':
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     parser = argparse.ArgumentParser(description="Run Tardis PCP pipeline for given days/exchanges")
     parser.add_argument("--days", required=True, help="Single day or comma-separated days (YYYY-MM-DD)")
     parser.add_argument("--exchanges", required=True, help="Single exchange or comma-separated exchanges")

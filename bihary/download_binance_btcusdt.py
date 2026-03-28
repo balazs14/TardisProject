@@ -4,6 +4,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from tardis_dev import datasets
+import sys
+from tardis.lib.utils import _configure_logging
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -62,6 +64,15 @@ def download_binance_btcusdt(fr='2019-01-01', to=None, symbol='BTCUSDT'):
 
 
 if __name__ == "__main__":
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     # Parameters
     symbol = 'BTCUSDT'  # Binance uses USDT instead of USD
     start_date = '2023-02-01'

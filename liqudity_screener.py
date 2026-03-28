@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import sys
+from tardis.lib.utils import _configure_logging
 
 # 1. Setup Environment
 load_dotenv()
@@ -197,4 +199,13 @@ def run_robust_sample(limit=3):
         print("Liquidity stats saved to liquidity_stats_output.csv")
 
 if __name__ == "__main__":
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     run_robust_sample(limit=10000000)  # Set a high limit to process all available options

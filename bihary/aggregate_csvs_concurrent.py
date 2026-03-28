@@ -5,6 +5,8 @@ import pyarrow.parquet as pq
 import numpy as np
 from glob import glob
 from concurrent.futures import ProcessPoolExecutor
+import sys
+from tardis.lib.utils import _configure_logging
 
 
 def process_single_csv(csv_file, output_dir, freq='5min'):
@@ -99,6 +101,15 @@ def concatenate_parquet_files(output_dir, final_output_file):
 
 
 if __name__ == "__main__":
+    _loglevel = "INFO"
+    if "--loglevel" in sys.argv:
+        _i = sys.argv.index("--loglevel")
+        if _i + 1 >= len(sys.argv):
+            raise SystemExit("Expected value after --loglevel")
+        _loglevel = sys.argv[_i + 1]
+        del sys.argv[_i:_i + 2]
+    _configure_logging(_loglevel)
+
     input_directory = "/my/TardisProject/bihary/datasets/"  # Replace with the directory containing your CSV files
     daily_output_directory = "/my/TardisProject/bihary/datasets/daily_parquets/"  # Directory for daily Parquet files
     final_output_parquet = "/my/TardisProject/bihary/datasets/BTCUSDT_final.parquet"  # Final concatenated Parquet file
