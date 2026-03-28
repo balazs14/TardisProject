@@ -13,7 +13,7 @@ import glob
 import pyarrow as pa
 from datetime import datetime, timedelta
 from tardis.process import compact  # noqa: F401
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 
 logger = logging.getLogger(__name__)

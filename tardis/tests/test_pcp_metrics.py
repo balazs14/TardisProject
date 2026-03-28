@@ -2,7 +2,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from tardis.lib import test_utils as tu
+from tardis import test_utils as tu
 from tardis.pcp_metrics import compute_pcp_metrics
 
 

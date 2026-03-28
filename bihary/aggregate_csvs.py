@@ -5,7 +5,7 @@ import pyarrow.parquet as pq
 import numpy as np
 from glob import glob
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 def process_csv_files(input_dir, output_file, freq='5min'):
     """

@@ -13,14 +13,14 @@ TardisProject is a Python 3.12 codebase for crypto market data workflows, focuse
 
 ## Main code locations
 
-- `tardis/lib/download_and_convert.py`
+- `tardis/download.py`
   - Core download + conversion + resample utilities.
   - Defines rich column type mapping (`TARDIS_COLUMN_TYPES`) and aggregation policies.
 - `okex.py`
   - Contains PCP breaking logic used by tests (`pcp_breaking_pandas`, `pcp_breaking_polars`).
 - `tests/test_pcp_breaking.py`
   - Snapshot-style validation of PCP metric outputs.
-- `tardis/tests/test_download_and_convert.py`
+- `tardis/tests/test_download_and_convert.py` (tests for `tardis/download.py`)
   - Behavioral tests for download/convert/resample paths.
 
 ## Data and output directories
@@ -81,7 +81,7 @@ black .
 
 ## Low-memory parquet zip workflow
 
-- Purpose: combine multiple `*_5min.parquet` outputs from `download_and_convert` without loading full files in memory.
+- Purpose: combine multiple `*_5min.parquet` outputs from `download_and_convert()` (in `tardis.download`) without loading full files in memory.
 - Preferred method: out-of-core joins over parquet scans keyed by:
   - `timestamp`
   - `symbol`

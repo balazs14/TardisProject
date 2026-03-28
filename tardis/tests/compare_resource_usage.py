@@ -7,9 +7,9 @@ import psutil
 from pathlib import Path
 import pandas as pd
 
-from tardis import download_and_convert as dac
+from tardis import download_files as dac
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 def measure_disk_usage(path):
     total = 0

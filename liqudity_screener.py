@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 # 1. Setup Environment
 load_dotenv()

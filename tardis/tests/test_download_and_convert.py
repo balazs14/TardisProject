@@ -100,7 +100,7 @@ import polars as pl
 import pyarrow.parquet as pq
 import pytest
 
-from tardis import download_and_convert as dac
+from tardis import download_files as dac
 
 
 def _write_day_csv(base_dir: Path, exchange: str, data_type: str, day: str, symbol: str) -> Path:

@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
-from tardis.download_and_convert import download_and_convert
+from tardis.download_files import download_and_convert
 
 
 logger = logging.getLogger(__name__)

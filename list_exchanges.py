@@ -4,7 +4,7 @@ import re
 import json
 from collections import defaultdict
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 # Load API key from .env
 try:

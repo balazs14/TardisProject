@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 from zmq import log
 a
-from tardis.lib.parquet_zip_join import inspect_inputs, zip_join_parquets
+from tardis.zipjoin_files import inspect_inputs, zip_join_parquets
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 logger = logging.getLogger(__name__)
 

@@ -5,7 +5,7 @@ import glob
 import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import timedelta, datetime
-from tardis.download_and_convert import TARDIS_COLUMN_TYPES
+from tardis.download_files import TARDIS_COLUMN_TYPES
 from tardis.implied_vol import compute_black_implied_vols
 
 logger = logging.getLogger(__name__)

@@ -8,7 +8,7 @@ Usage:
 
 Example:
   ./generic_loop.sh -N 4 -S 2025-12-01 -E 2025-12-06 \
-    venv/bin/python -m tardis.download_and_convert --start-date DATE --end-date DATE --loglevel DEBUG
+    venv/bin/python -m tardis.download_files --start-date DATE --end-date DATE --loglevel DEBUG
 
 Notes:
   - DATE is replaced in every command argument for each day in [S, E] inclusive.

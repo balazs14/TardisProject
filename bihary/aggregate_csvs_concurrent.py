@@ -6,7 +6,7 @@ import numpy as np
 from glob import glob
 from concurrent.futures import ProcessPoolExecutor
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 
 def process_single_csv(csv_file, output_dir, freq='5min'):

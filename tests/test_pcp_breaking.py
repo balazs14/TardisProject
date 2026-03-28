@@ -4,7 +4,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from tardis.lib import test_utils as tu
+from tardis import test_utils as tu
 #.lib.test_utils import assert_df_equal, df_from_string
 
 from okex import pcp_breaking_pandas

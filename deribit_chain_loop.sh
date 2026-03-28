@@ -36,7 +36,7 @@ trap on_term HUP QUIT
 
 run_day() {
     local day=$1
-    local cmd="venv/bin/python -m tardis.download_and_convert \
+    local cmd="venv/bin/python -m tardis.download_files \
         --data-type options_chain --exchange deribit --symbol OPTIONS \
         --start-date $day --end-date $day \
         --loglevel DEBUG --data-dir datasets/deribit_chain --resample-freq 5min"

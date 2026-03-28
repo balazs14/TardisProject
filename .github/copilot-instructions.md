@@ -16,7 +16,7 @@
 
 Reference implementations:
 
-- Generic downloader/converter: `tardis/lib/download_and_convert.py`
+- Generic downloader/converter: `tardis/download.py`
 - OKX enrichment + PCP metrics: `okex.py` (`augment_quotes`, `merge_data`, `pcp_breaking_*`)
 - Snapshot tests for PCP outputs: `tests/test_pcp_breaking.py`
 
@@ -41,7 +41,7 @@ Reference implementations:
 
 - Prefer targeted tests first:
   - `tests/test_pcp_breaking.py`
-  - `tardis/tests/test_download_and_convert.py`
+  - `tardis/tests/test_download_and_convert.py` (tests for `tardis/download.py`)
 - For data-download logic, tests monkeypatch `datasets.download`; keep new tests offline/deterministic.
 - Scripts in `attic/` are exploratory/archive; avoid treating them as canonical unless explicitly requested.
 

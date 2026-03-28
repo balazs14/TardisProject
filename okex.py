@@ -1,6 +1,6 @@
 import logging
 import warnings
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 warnings.simplefilter('ignore')
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -26,8 +26,8 @@ import pyarrow.csv as pv
 from dataclasses import dataclass, field
 from typing import List, Dict
 
-from tardis.lib import pandas_utils as pu
-from tardis.lib import utils
+from tardis import pandas_utils as pu
+from tardis import utils
 
 from tardis_client import TardisClient, Channel
 from tardis_dev import datasets

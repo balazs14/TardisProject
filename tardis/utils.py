@@ -1,5 +1,5 @@
-from . import get_pybt_logger
-logger = get_pybt_logger(__name__)
+from . import get_my_logger
+logger = get_my_logger(__name__)
 import logging
 import asyncio
 import functools

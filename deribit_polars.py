@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from tardis_dev import datasets
 import pandas as pd
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 
 # ---------------------------------------------------------

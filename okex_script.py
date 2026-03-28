@@ -17,7 +17,7 @@
 # %%
 # imports
 import okex
-from tardis.lib import pandas_utils as pu
+from tardis import pandas_utils as pu
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np

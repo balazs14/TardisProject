@@ -5,7 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tardis_dev import datasets
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)

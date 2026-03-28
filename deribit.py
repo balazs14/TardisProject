@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from tardis_dev import datasets
 import glob
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 # 1. Initialize Environment
 load_dotenv()

@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 import requests
 from tardis_dev import datasets
 import sys
-from tardis.lib.utils import _configure_logging
+from tardis.utils import _configure_logging
 
 
 logger = logging.getLogger(__name__)
