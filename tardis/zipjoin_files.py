@@ -76,8 +76,7 @@ def parquet_summary(path: str | Path) -> dict[str, object]:
               COUNT(*) AS n_rows,
               COUNT(DISTINCT symbol) AS n_symbols,
               MIN(timestamp) AS min_ts,
-              MAX(timestamp) AS max_ts,
-              ANY_VALUE(exchange) AS sample_exchange
+              MAX(timestamp) AS max_ts
             FROM read_parquet(?)
             """,
             [str(path)],
@@ -88,7 +87,6 @@ def parquet_summary(path: str | Path) -> dict[str, object]:
             "n_symbols": row[1],
             "min_ts": row[2],
             "max_ts": row[3],
-            "sample_exchange": row[4],
         }
     finally:
         con.close()

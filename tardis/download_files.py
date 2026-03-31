@@ -343,13 +343,12 @@ def _iter_tardis_csv_rows_streaming(
         response.raise_for_status()
         response.raw.decode_content = True
         with gzip.GzipFile(fileobj=response.raw) as gz:
-            logger.warning('here1')
             reader = pv.open_csv(gz, read_options=read_options, convert_options=convert_options)
-            logger.warning('here2')
             try:
                 for batch in reader:
                     df = pl.from_arrow(pa.Table.from_batches([batch]))
                     df = _cast_temporal_fallback_columns(df, TARDIS_COLUMN_TYPES)
+                    logger.debug(f"Processing batch {df}")
                     yield df
             finally:
                 reader.close()
@@ -437,7 +436,7 @@ def download_and_convert_streaming_resample(
             chunk_idx = 0
             COMPACT_EVERY = 10  # merge accumulated chunks every N raw chunks to bound memory
             for chunk_df in _iter_tardis_csv_rows_streaming(url, api_key=api_key):
-                print (chunk_df)
+                logger.debug(f"Processing chunk {chunk_df}")
                 rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
                 last_ts = chunk_df["timestamp"][-1] if "timestamp" in chunk_df.columns else None
                 logger.debug(
@@ -447,7 +446,9 @@ def download_and_convert_streaming_resample(
                 pldf = _cast_temporal_fallback_columns(chunk_df, TARDIS_COLUMN_TYPES)
                 if pldf.schema.get("timestamp") != pl.Datetime(TIMESTAMP_UNIT):
                     pldf = pldf.with_columns(pl.col("timestamp").cast(pl.Datetime(TIMESTAMP_UNIT)))
+                logger.debug(f"data_type {data_type} ")
                 if data_type == "trades":
+                    logger.debug("Using trade-specific aggregation for chunk %d", chunk_idx)
                     agg = _aggregate_resample_trade_chunk(pldf, freq=resample_freq, tscol="timestamp")
                 else:
                     agg = _aggregate_resample_chunk(pldf, freq=resample_freq, tscol="timestamp")
@@ -544,7 +545,7 @@ def peek_streaming_raw(
             logger.info("peek: day=%s rows_in_first_chunk=%d cols=%d", day.date(), first_chunk.height, first_chunk.width)
             logger.info("peek columns: %s", first_chunk.columns)
             logger.info("peek inferred schema: %s", first_chunk.schema)
-            print(first_chunk.head(head_rows))
+            logger.info(first_chunk.head(head_rows))
             return
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 404:
@@ -921,18 +922,19 @@ def download_and_convert(
     return parquet_paths
 
 def testme():
-    paths = download_and_convert(
+    paths = download_and_convert_streaming_resample(
         exchange="deribit",
-        data_type="options_chain",
+        data_type="trades",
         symbol="OPTIONS",
-        start_date="2026-03-13",
-        end_date="2026-03-13",
-        data_dir="datasets/deribit_chain",
-        force_reload=True,
+        start_date="2026-03-26",
+        end_date="2026-03-26",
+        data_dir="datasets/deribit",
+        force_reload=True ,
         cleanup_csv=False,
         resample_freq='5min',
     )
-    print(paths)
+    
+    return paths
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
@@ -1079,10 +1081,7 @@ def _main() -> None:
         resample_freq=args.resample_freq,
     )
     for path in paths:
-        print(path)
-
-def testme():
-    download_and_convert_streaming_resample('deribit','trades','OPTIONS','2026-03-26','2026-03-26',resample_freq='5min', force_reload=True)
+        logger.debug(path)
 
 if __name__ == "__main__": 
     _main()
