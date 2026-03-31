@@ -2,7 +2,7 @@
 def universe_exchanges(exchange_regex=None):
     """Return a list of exchange dicts, optionally filtered by regex on id."""
     import re
-    exs = list_exchanges(datasets_only=True)
+    exs = _list_exchanges(datasets_only=True)
     if exchange_regex:
         pat = re.compile(exchange_regex, re.IGNORECASE)
         exs = [e for e in exs if pat.search(e["id"])]
@@ -25,7 +25,7 @@ def universe_symbols(
         return []
     out = []
     for exch in exs if isinstance(exs[0], str) else [e["id"] for e in exs]:
-        syms = filtered_symbols(
+        syms = _filtered_symbols(
             exchange=exch,
             symbol_type_regex=symbol_type_regex,
             symbol_regex=symbol_regex,
@@ -48,7 +48,7 @@ def universe_data_types(exchange=None, exchange_regex=None):
         return {}
     result = {}
     for exch in exs if isinstance(exs[0], str) else [e["id"] for e in exs]:
-        result[exch] = data_types_for_exchange(exch)
+        result[exch] = _data_types_for_exchange(exch)
     return result
 
 
@@ -67,7 +67,7 @@ def universe_columns(
         return []
     out = []
     for exch in exs if isinstance(exs[0], str) else [e["id"] for e in exs]:
-        targets = matched_stream_targets(
+        targets = _matched_stream_targets(
             exchange=exch,
             symbol_regex=symbol_regex,
             stream_type_regex=stream_type_regex,
@@ -75,7 +75,7 @@ def universe_columns(
             head=head,
         )
         for t in targets:
-            preview = stream_columns_head(
+            preview = _stream_columns_head(
                 exchange=t["exchange"],
                 symbol=t["symbol"],
                 stream_type=t["stream_type"],
@@ -225,7 +225,7 @@ def _dataset_symbols(exchange: str, symbol_type_regex=None, symbol_regex=None, d
     date              : ISO date string 'YYYY-MM-DD'; keep only symbols available on that date
     """
     import re
-    details = exchange_details(exchange)
+    details = _exchange_details(exchange)
     symbols = details.get("datasets", {}).get("symbols", [])
 
     if symbol_type_regex:
@@ -270,14 +270,14 @@ def _filtered_symbols(
     head=None,
 ):
     """Return symbols filtered by type/symbol/date and optional stream type + head."""
-    symbols = dataset_symbols(
+    symbols = _dataset_symbols(
         exchange=exchange,
         symbol_type_regex=symbol_type_regex,
         symbol_regex=symbol_regex,
         date=date,
     )
     if stream_type_regex:
-        symbols = filter_data_types(symbols, stream_type_regex)
+        symbols = _filter_data_types(symbols, stream_type_regex)
     if head is not None:
         if head < 0:
             raise ValueError("head must be >= 0")
@@ -289,7 +289,7 @@ def _matched_stream_targets(exchange: str, symbol_regex=None, stream_type_regex=
     """Return a list of stream targets with a sample_day computed from the date filter or latest available day."""
     import datetime
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-    symbols = filtered_symbols(
+    symbols = _filtered_symbols(
         exchange=exchange,
         symbol_regex=symbol_regex,
         stream_type_regex=stream_type_regex,
@@ -426,7 +426,7 @@ def _matched_stream_columns_head(
     sample_rows: int = 2,
 ):
     """Return transposed column previews for matched downloadable stream files."""
-    targets = matched_stream_targets(
+    targets = _matched_stream_targets(
         exchange=exchange,
         symbol_regex=symbol_regex,
         stream_type_regex=stream_type_regex,
@@ -435,7 +435,7 @@ def _matched_stream_columns_head(
     )
     previews = []
     for t in targets:
-        preview = stream_columns_head(
+        preview = _stream_columns_head(
             exchange=t["exchange"],
             symbol=t["symbol"],
             stream_type=t["stream_type"],
@@ -454,7 +454,7 @@ def _key_info():
 
 def _data_types_for_exchange(exchange: str):
     """Summarise which data-types are available per symbol type for an exchange."""
-    symbols = dataset_symbols(exchange)
+    symbols = _dataset_symbols(exchange)
     coverage = {}   # type -> set of dataTypes
     for s in symbols:
         t = s.get("type", "unknown")
@@ -723,12 +723,12 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "exchanges":
-        exs = list_exchanges(datasets_only=True)
-        print_exchanges(exs)
+        exs = _list_exchanges(datasets_only=True)
+        _print_exchanges(exs)
 
     if args.cmd == "symbols":
         import re
-        all_exs = [e["id"] for e in list_exchanges(datasets_only=True)]
+        all_exs = [e["id"] for e in _list_exchanges(datasets_only=True)]
         if args.exchange:
             exchanges = [args.exchange]
         else:
@@ -736,7 +736,7 @@ def main():
             exchanges = [e for e in all_exs if pat.search(e)]
         for exch in exchanges:
             total = len(
-                filtered_symbols(
+                _filtered_symbols(
                     exchange=exch,
                     symbol_type_regex=args.symbol_type_regex,
                     symbol_regex=args.symbol_regex,
@@ -744,7 +744,7 @@ def main():
                     date=args.date,
                 )
             )
-            syms = filtered_symbols(
+            syms = _filtered_symbols(
                 exchange=exch,
                 symbol_type_regex=args.symbol_type_regex,
                 symbol_regex=args.symbol_regex,
@@ -761,13 +761,13 @@ def main():
                       + (f"  (stream-type-regex={args.stream_type_regex})" if args.stream_type_regex else "")
                       + (f"  (head={args.head})" if args.head is not None else "")
                       + (f"  (date={args.date})" if args.date else ""))
-                print_symbols(syms, show_data_types=args.show_available_types)
+                _print_symbols(syms, show_data_types=args.show_available_types)
                 if args.head is not None and total > len(syms):
                     print(f"\nShowing first {len(syms)} of {total} matching symbols.")
 
     elif args.cmd == "columns":
         import re
-        all_exs = [e["id"] for e in list_exchanges(datasets_only=True)]
+        all_exs = [e["id"] for e in _list_exchanges(datasets_only=True)]
         if args.exchange:
             exchanges = [args.exchange]
         else:
@@ -775,7 +775,7 @@ def main():
             exchanges = [e for e in all_exs if pat.search(e)]
         for exch in exchanges:
             try:
-                previews = matched_stream_columns_head(
+                previews = _matched_stream_columns_head(
                     exchange=exch,
                     symbol_regex=args.symbol_regex,
                     stream_type_regex=args.stream_type_regex,
@@ -796,26 +796,26 @@ def main():
                     + (f"  (date={args.date})" if args.date else "")
                     + (f"  (head={args.head})" if args.head is not None else "")
                 )
-                print_columns_transposed(previews)
+                _print_columns_transposed(previews)
 
     elif args.cmd == "data-types":
         import re
-        all_exs = [e["id"] for e in list_exchanges(datasets_only=True)]
+        all_exs = [e["id"] for e in _list_exchanges(datasets_only=True)]
         if args.exchange:
             exchanges = [args.exchange]
         else:
             pat = re.compile(args.exchange_regex, re.IGNORECASE)
             exchanges = [e for e in all_exs if pat.search(e)]
         for exch in exchanges:
-            coverage = data_types_for_exchange(exch)
+            coverage = _data_types_for_exchange(exch)
             print(f"\nData-types available on {exch}:")
             for t, dts in sorted(coverage.items()):
                 print(f"  {t:<20} {dts}")
 
     elif args.cmd == "key-info":
-        info = key_info()
+        info = _key_info()
         print("\nAPI key coverage:")
-        print_key_info(info)
+        _print_key_info(info)
 
     else:
         parser.print_help()
