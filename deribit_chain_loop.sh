@@ -29,7 +29,7 @@ on_term() {
     exit 143
 }
 
-trap cleanup EXIT
+trap cleanup EXIT 
 trap on_int INT
 trap on_term TERM
 trap on_term HUP QUIT

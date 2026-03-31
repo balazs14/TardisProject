@@ -10,6 +10,8 @@ TardisProject is a Python 3.12 codebase for crypto market data workflows, focuse
 - Convert large CSV inputs to typed parquet files with stable schema handling.
 - Resample time-series data for analysis-ready intervals.
 - Compute strategy/arb diagnostics (e.g., PCP breaking metrics) with both pandas and polars paths.
+- Structure code so that the tardis/ folder can later be released as an importable library, while standalone scripts and notebooks can live at the repo root.
+- Attic is not part of the project, it is just like a Trash folder
 
 ## Main code locations
 
