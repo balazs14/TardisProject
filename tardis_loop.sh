@@ -14,7 +14,7 @@ while d > start:
 EOF
             ); do
     for ex in deribit okex; do
-        cmd="python -m tardis.main --days $day --exchanges $ex --cleanup_csv true --cleanup_intermediate_parquet false --force_reload false --loglevel INFO --align_only true"
+        cmd="python -m tardis.main --days $day --exchanges $ex --cleanup_intermediate_parquet false --force_reload false --loglevel INFO --align_only true"
         echo $cmd
         if ! $cmd ; then
             echo $day failed, continuing >& 2

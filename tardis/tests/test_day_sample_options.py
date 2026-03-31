@@ -14,19 +14,19 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
     quote_path = tmp_path / f"{exchange}_quotes_{day}_{symbol}_5min.parquet"
     pl.DataFrame({"symbol": [symbol], "timestamp": [1]}).write_parquet(quote_path)
 
-    # monkeypatch.setattr(
-    #     dso,
-    #     "EXCHANGE_DOWNLOADS",
-    #     {
-    #         exchange: {
-    #             "static": [(exchange, "quotes", symbol)],
-    #         }
-    #     },
-    # )
+    monkeypatch.setattr(
+        dso,
+        "EXCHANGE_DOWNLOADS",
+        {
+            exchange: {
+                "static": [(exchange, "quotes", symbol)],
+            }
+        },
+    )
 
     calls: dict[str, object] = {}
 
-    def fake_download_and_convert(**kwargs):
+    def fake_download_and_convert_streaming_resample(**kwargs):
         calls["download_resample_freq"] = kwargs["resample_freq"]
         return [quote_path]
 
@@ -50,8 +50,9 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
             }
         )
 
-    def fake_align_calls_puts_with_legs(df):
+    def fake_align_calls_puts_with_legs(df, trade_df):
         calls["sampled_rows"] = df.height
+        calls["trade_rows"] = trade_df.height
         return pl.DataFrame(
             {
                 "ts": [pd.Timestamp("2023-02-01 00:00:00")],
@@ -61,7 +62,7 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
             }
         )
 
-    monkeypatch.setattr(dso, "download_and_convert", fake_download_and_convert)
+    monkeypatch.setattr(dso, "download_and_convert_streaming_resample", fake_download_and_convert_streaming_resample)
     monkeypatch.setattr(dso, "_normalize_quotes", fake_normalize_quotes)
     monkeypatch.setattr(dso, "_resample_normalized_quotes", fake_resample_normalized_quotes)
     monkeypatch.setattr(dso, "_align_calls_puts_with_legs", fake_align_calls_puts_with_legs)
@@ -72,7 +73,6 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
         freq="5min",
         post_resample_freq="15min",
         force_reload=True,
-        cleanup_csv=False,
         cleanup_intermediate_parquet=False,
     )
 
@@ -82,6 +82,7 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
     assert calls["post_resample_freq"] == "15min"
     assert calls["normalized_rows"] == 1
     assert calls["sampled_rows"] == 1
+    assert calls["trade_rows"] == 0
 
     output_path = Path(config.output_dir) / f"{exchange}_aligned_options_{day}_15min.parquet"
     assert output_path.exists()

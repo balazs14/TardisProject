@@ -58,7 +58,7 @@ def multi_day_exchange(days, exchanges, config: SampleConfig, align_only=True):
 
 def testme():
     _configure_logging('INFO')
-    main('2026-03-14', 'deribit', cleanup_csv=False, align_only=True)
+    main('2026-03-14', 'deribit', align_only=True)
     #main('2026-02-13', 'okex')
 
 def main(
@@ -67,7 +67,6 @@ def main(
     freq='5min',
     post_resample_freq=None,
     force_reload=False,
-    cleanup_csv=True,
     cleanup_intermediate_parquet=False,
     align_only=True,
 ):
@@ -76,13 +75,12 @@ def main(
     if not isinstance(exchanges, (list,tuple)):
         exchanges = [exchanges]
     logger.info(
-        "main start days=%d exchanges=%d freq=%s post_resample_freq=%s force_reload=%s cleanup_csv=%s cleanup_intermediate_parquet=%s",
+        "main start days=%d exchanges=%d freq=%s post_resample_freq=%s force_reload=%s cleanup_intermediate_parquet=%s",
         len(days),
         len(exchanges),
         freq,
         post_resample_freq,
         force_reload,
-        cleanup_csv,
         cleanup_intermediate_parquet,
     )
     dfs = []
@@ -93,7 +91,6 @@ def main(
             freq=freq,
             post_resample_freq=post_resample_freq,
             force_reload=force_reload,
-            cleanup_csv=cleanup_csv,
             cleanup_intermediate_parquet=cleanup_intermediate_parquet,
             )
         df = multi_day_exchange(days, ex, cfg, align_only=align_only)
@@ -136,7 +133,6 @@ if __name__ == '__main__':
     parser.add_argument("--freq", default="5min", help="Resampling frequency (default: 5min)")
     parser.add_argument("--post_resample_freq", default=None, help="Optional second-stage resample frequency before alignment (e.g. 15min)")
     parser.add_argument("--force_reload", type=_parse_bool, default=False, help="Force reload source data (default: False)")
-    parser.add_argument("--cleanup_csv", type=_parse_bool, default=True, help="Remove source CSV files after conversion (default: True)")
     parser.add_argument("--cleanup_intermediate_parquet", type=_parse_bool, default=False, help="Remove intermediate parquet and pkl files after pipeline (default: False)")
     parser.add_argument("--align_only", type=_parse_bool, default=True, help="Stop after alignment, skip PCP metrics and IV (default: True)")
 
@@ -146,13 +142,12 @@ if __name__ == '__main__':
     _configure_logging(args.loglevel)
 
     logger.info(
-        "cli args days=%s exchanges=%s freq=%s post_resample_freq=%s force_reload=%s cleanup_csv=%s cleanup_intermediate_parquet=%s",
+        "cli args days=%s exchanges=%s freq=%s post_resample_freq=%s force_reload=%s cleanup_intermediate_parquet=%s",
         days,
         exchanges,
         args.freq,
         args.post_resample_freq,
         args.force_reload,
-        args.cleanup_csv,
         args.cleanup_intermediate_parquet,
     )
 
@@ -162,7 +157,6 @@ if __name__ == '__main__':
         freq=args.freq,
         post_resample_freq=args.post_resample_freq,
         force_reload=args.force_reload,
-        cleanup_csv=args.cleanup_csv,
         cleanup_intermediate_parquet=args.cleanup_intermediate_parquet,
         align_only=args.align_only,
     )

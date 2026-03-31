@@ -1,11 +1,11 @@
 import os
-import shutil
 import tempfile
 import time
 import tracemalloc
 import psutil
 from pathlib import Path
 import pandas as pd
+import polars as pl
 
 from tardis import download_files as dac
 import sys
@@ -44,72 +44,50 @@ def run_and_measure(method, *args, **kwargs):
     }
 
 def main():
-    # Use a deterministic fake download as in the tests
+    # Use a deterministic fake streamed chunk to measure the streaming path.
     exchange = "binance"
     data_type = "quotes"
     symbol = "OPTIONS"
     day = "2023-02-01"
     resample_freq = "5min"
 
-    # Create a temp dir for each method
-    for method_name, method in [
-        ("batch", dac.download_and_convert),
-        ("streaming", dac.download_and_convert_streaming_resample),
-    ]:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Write a fake CSV for batch, or patch streaming to read it
-            def fake_download(*, exchange, data_types, from_date, to_date, symbols, download_dir, **kwargs):
-                csv_path = Path(download_dir) / f"{exchange}_{data_types[0]}_{day}_{symbols[0]}.csv.gz"
-                df = pd.DataFrame(
-                    {
-                        "exchange": [exchange] * 6,
-                        "symbol": ["A", "A", "A", "B", "B", "B"],
-                        "timestamp": [
-                            1675209660000000,
-                            1675209720000000,
-                            1675210320000000,
-                            1675209780000000,
-                            1675209840000000,
-                            1675210080000000,
-                        ],
-                        "local_timestamp": [
-                            1675209660000000,
-                            1675209720000000,
-                            1675210320000000,
-                            1675209780000000,
-                            1675209840000000,
-                            1675210080000000,
-                        ],
-                        "bid_price": [100.0, 101.0, 103.0, 200.0, 201.0, 202.0],
-                        "ask_price": [101.0, 102.0, 104.0, 201.0, 202.0, 203.0],
-                        "volume": [1.0, 2.0, 3.0, 10.0, 11.0, 12.0],
-                    }
-                )
-                df.to_csv(csv_path, index=False, compression="gzip")
-            dac.datasets.download = fake_download
+    with tempfile.TemporaryDirectory() as tmpdir:
+        chunk = pl.DataFrame(
+            {
+                "exchange": [exchange] * 6,
+                "symbol": ["A", "A", "A", "B", "B", "B"],
+                "timestamp": [
+                    1675209660000000,
+                    1675209720000000,
+                    1675210320000000,
+                    1675209780000000,
+                    1675209840000000,
+                    1675210080000000,
+                ],
+                "local_timestamp": [
+                    1675209660000000,
+                    1675209720000000,
+                    1675210320000000,
+                    1675209780000000,
+                    1675209840000000,
+                    1675210080000000,
+                ],
+                "bid_price": [100.0, 101.0, 103.0, 200.0, 201.0, 202.0],
+                "ask_price": [101.0, 102.0, 104.0, 201.0, 202.0, 203.0],
+                "volume": [1.0, 2.0, 3.0, 10.0, 11.0, 12.0],
+            }
+        )
 
-            if method_name == "streaming":
-                # Write the CSV file directly for streaming
-                fake_download(
-                    exchange=exchange,
-                    data_types=[data_type],
-                    from_date=day,
-                    to_date=day,
-                    symbols=[symbol],
-                    download_dir=tmpdir,
-                )
-                # Patch streaming to read the same CSV
-                def fake_iter_tardis_csv_rows_streaming(url, api_key=None):
-                    import csv, gzip
-                    csv_path = Path(tmpdir) / f"{exchange}_{data_type}_{day}_{symbol}.csv.gz"
-                    with gzip.open(csv_path, "rt") as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            yield row
-                dac._iter_tardis_csv_rows_streaming = fake_iter_tardis_csv_rows_streaming
+        original_iter = dac._iter_tardis_csv_rows_streaming
 
-            print(f"\nRunning {method_name}...")
-            kwargs = dict(
+        def fake_iter_tardis_csv_rows_streaming(url, api_key=None):
+            yield chunk
+
+        dac._iter_tardis_csv_rows_streaming = fake_iter_tardis_csv_rows_streaming
+        try:
+            print("\nRunning streaming...")
+            stats = run_and_measure(
+                dac.download_and_convert_streaming_resample,
                 exchange=exchange,
                 data_type=data_type,
                 symbol=symbol,
@@ -118,12 +96,11 @@ def main():
                 data_dir=tmpdir,
                 resample_freq=resample_freq,
             )
-            if method_name == "batch":
-                kwargs["cleanup_csv"] = False
-            stats = run_and_measure(method, **kwargs)
             print(f"Time: {stats['time']:.3f}s")
             print(f"Peak RAM: {stats['peak_mem']/1024/1024:.2f} MB")
             print(f"Disk used: {stats['disk_used']/1024:.2f} KB")
+        finally:
+            dac._iter_tardis_csv_rows_streaming = original_iter
 
 if __name__ == "__main__":
     _loglevel = "INFO"

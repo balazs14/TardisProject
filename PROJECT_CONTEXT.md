@@ -83,7 +83,7 @@ black .
 
 ## Low-memory parquet zip workflow
 
-- Purpose: combine multiple `*_5min.parquet` outputs from `download_and_convert()` (in `tardis.download`) without loading full files in memory.
+- Purpose: combine multiple `*_5min.parquet` outputs from `download_and_convert_streaming_resample()` (in `tardis.download_files`) without loading full files in memory.
 - Preferred method: out-of-core joins over parquet scans keyed by:
   - `timestamp`
   - `symbol`

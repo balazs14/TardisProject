@@ -2,7 +2,6 @@ import argparse
 import logging
 import os
 import resource
-import csv
 import gzip
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,9 +11,7 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.csv as pv
-import pyarrow.parquet as pq
 import requests
-from tardis_dev import datasets
 import sys
 from tardis.utils import _configure_logging
 
@@ -248,73 +245,6 @@ def _cast_temporal_fallback_columns(df: pl.DataFrame, column_types: dict[str, pa
     return df.with_columns(cast_exprs)
 
 
-def _parse_stream_timestamp(raw_ts) -> pd.Timestamp:
-    if isinstance(raw_ts, (int, float)):
-        iv = int(raw_ts)
-        n = len(str(iv))
-        if n >= 19:
-            return pd.to_datetime(iv, unit="ns")
-        if n >= 16:
-            return pd.to_datetime(iv, unit="us")
-        if n >= 13:
-            return pd.to_datetime(iv, unit="ms")
-        return pd.to_datetime(iv, unit="s")
-
-    raw_ts = (raw_ts or "").strip()
-    if not raw_ts:
-        raise ValueError("Empty timestamp")
-
-    if raw_ts.isdigit():
-        iv = int(raw_ts)
-        n = len(raw_ts)
-        if n >= 19:
-            return pd.to_datetime(iv, unit="ns")
-        if n >= 16:
-            return pd.to_datetime(iv, unit="us")
-        if n >= 13:
-            return pd.to_datetime(iv, unit="ms")
-        return pd.to_datetime(iv, unit="s")
-
-    ts = pd.Timestamp(raw_ts)
-    if ts.tz is not None:
-        ts = ts.tz_convert(None)
-    return ts
-
-
-def _parse_stream_value(col: str, raw_val):
-    if isinstance(raw_val, float) and pd.isna(raw_val):
-        return None
-    if not isinstance(raw_val, str):
-        return raw_val
-    raw_val = (raw_val or "").strip()
-    if raw_val in {"", "null", "None", "NULL", "NaN", "nan"}:
-        return None
-
-    dtype = TARDIS_COLUMN_TYPES.get(col)
-    if dtype is None:
-        return raw_val
-
-    if pa.types.is_floating(dtype):
-        try:
-            return float(raw_val)
-        except ValueError:
-            return None
-    if pa.types.is_integer(dtype):
-        try:
-            return int(raw_val)
-        except ValueError:
-            return None
-    if pa.types.is_boolean(dtype):
-        return raw_val.lower() in {"1", "true", "t", "yes", "y"}
-    if pa.types.is_timestamp(dtype) or pa.types.is_date32(dtype) or pa.types.is_date64(dtype):
-        try:
-            return int(raw_val)
-        except ValueError:
-            return None
-
-    return raw_val
-
-
 def _tardis_csv_url(exchange: str, data_type: str, day: pd.Timestamp, symbol: str) -> str:
     return (
         f"https://datasets.tardis.dev/v1/{exchange}/{data_type}/"
@@ -354,12 +284,6 @@ def _iter_tardis_csv_rows_streaming(
                 reader.close()
 
 
-def _iter_parquet_chunks(path: Path, chunk_size: int = 500_000):
-    parquet_file = pq.ParquetFile(path)
-    for batch in parquet_file.iter_batches(batch_size=chunk_size):
-        yield pl.from_arrow(batch)
-
-
 def _online_finalize_bucket_row(
     symbol: str,
     bucket: pd.Timestamp,
@@ -394,7 +318,6 @@ def download_and_convert_streaming_resample(
     start_date: str,
     end_date: str,
     data_dir: str = ".",
-    cleanup_csv = "ignored",
     force_reload: bool = False,
     resample_freq: str = "1min",
 ) -> List[Path]:
@@ -691,236 +614,6 @@ def _merge_resample_aggregates(df: pl.DataFrame, tscol: str = "timestamp") -> pl
         .sort(["symbol", tscol])
     )
 
-
-
-def _convert_csv_to_parquet(
-    data_type,
-    exchange,
-    mdy,
-    csv_path: Path,
-    parquet_path: Path,
-    block_size: int = 32 * 1024 * 1024,
-    force_reload: bool = False,
-    resample_freq: str | None = None,
-) -> Path:
-    if parquet_path.exists() and not force_reload:
-        logger.debug("Parquet already exists: %s", parquet_path)
-        return parquet_path
-
-    if parquet_path.exists() and force_reload:
-        parquet_path.unlink(missing_ok=True)
-
-    logger.debug("Converting %s -> %s", csv_path, parquet_path)
-    mdy_date = pd.Timestamp(mdy).date()
-
-    read_options = pv.ReadOptions(block_size=block_size)
-    default_convert_options = pv.ConvertOptions(
-        column_types=TARDIS_COLUMN_TYPES,
-        null_values=["", "null", "None", "NULL", "NaN", "nan"],
-    )
-
-    def _open_gz(path: Path):
-        return gzip.open(path, "rb") if str(path).endswith(".gz") else open(path, "rb")
-
-    timestamps_read_as_int = False
-    gz_f = _open_gz(csv_path)
-    try:
-        reader = pv.open_csv(
-            gz_f,
-            read_options=read_options,
-            convert_options=default_convert_options,
-        )
-    except pa.ArrowInvalid:
-        gz_f.close()
-        fallback_types = _temporal_fallback_column_types(TARDIS_COLUMN_TYPES)
-        fallback_convert_options = pv.ConvertOptions(
-            column_types=fallback_types,
-            null_values=["", "null", "None", "NULL", "NaN", "nan"],
-        )
-        gz_f = _open_gz(csv_path)
-        reader = pv.open_csv(
-            gz_f,
-            read_options=read_options,
-            convert_options=fallback_convert_options,
-        )
-        timestamps_read_as_int = True
-
-    writer = None
-    resample_chunks: list[pl.DataFrame] = []
-
-    try:
-        for batch in reader:
-            table = pa.Table.from_batches([batch])
-
-            if timestamps_read_as_int:
-                table_df = pl.from_arrow(table)
-                table_df = _cast_temporal_fallback_columns(table_df, TARDIS_COLUMN_TYPES)
-                table = table_df.to_arrow()
-
-            if False:
-                table_df = pl.from_arrow(table)
-                table_df = table_df.with_columns(
-                    [
-                        pl.lit(exchange).cast(pl.Utf8).alias("exchange"),
-                        pl.lit(data_type).cast(pl.Utf8).alias("data_type"),
-                        pl.lit(mdy_date).cast(pl.Date).alias("mdy"),
-                    ]
-                )
-                table = table_df.to_arrow()
-
-            if resample_freq:
-                logger.debug("_convert_csv_to_parquet resample chunk rows=%d freq=%s", table_df.height, resample_freq)
-                if data_type == 'trades':
-                    resample_chunks.append(_aggregate_resample_trade_chunk(table_df, freq=resample_freq, tscol="timestamp"))
-                else:
-                    resample_chunks.append(_aggregate_resample_chunk(table_df, freq=resample_freq, tscol="timestamp"))
-            else:
-                if writer is None:
-                    writer = pq.ParquetWriter(str(parquet_path), table.schema, compression="snappy")
-                writer.write_table(table)
-                logger.debug(f'wrote chunk')
-
-    finally:
-        gz_f.close()
-        if writer is not None:
-            writer.close()
-
-    if resample_freq:
-        if resample_chunks:
-            logger.debug("Resampling converted CSV %s at freq=%s before parquet write", csv_path, resample_freq)
-            combined = pl.concat(resample_chunks, rechunk=False)
-            combined = _merge_resample_aggregates(combined, tscol="timestamp")
-            final_df = _expand_resampled_buckets(combined, freq=resample_freq, tscol="timestamp")
-            # Sort columns alphabetically to match streaming output
-            final_df = final_df.select(sorted(final_df.columns))
-            final_df.write_parquet(parquet_path)
-            logger.debug(f'wrote {parquet_path} (resample_chunks)')
-        else:
-            pl.DataFrame().write_parquet(parquet_path)
-            logger.debug(f'wrote {parquet_path}')
-
-    logger.info("Finished converting %s", parquet_path)
-    return parquet_path
-
-
-def download_and_convert(
-    exchange: str,
-    data_type: str,
-    symbol: str,
-    start_date: str,
-    end_date: str,
-    data_dir: str = ".",
-    force_reload: bool = False,
-    cleanup_csv: bool = True,
-    resample_freq: str | None = None,
-) -> List[Path]:
-    """
-    Download and convert Tardis CSV files for an arbitrary (exchange, data_type, symbol) tuple.
-
-    File naming convention:
-    - CSV:     {exchange}_{datatype}_{date}_{symbol}.csv.gz
-    - Parquet: {exchange}_{datatype}_{date}_{symbol}.parquet
-    - Resampled parquet: {exchange}_{datatype}_{date}_{symbol}_{freq}.parquet
-
-    Parameters
-    ----------
-    exchange : str
-        Exchange name, e.g. "binance", "okex", "deribit".
-    data_type : str
-        Tardis data type, e.g. "trades", "quotes", "options_chain".
-    symbol : str
-        Instrument symbol in exchange notation.
-    start_date : str
-        Inclusive start date (YYYY-MM-DD).
-    end_date : str
-        Inclusive end date (YYYY-MM-DD).
-    data_dir : str
-        Directory where files are downloaded and stored.
-    force_reload : bool
-        If True, conversion is forced even when target parquet file already exists.
-    cleanup_csv : bool
-        If True, remove source CSV files after successful conversion. Defaults to True.
-    resample_freq : str | None
-        If provided, bucket and forward-fill each CSV to this frequency before writing parquet.
-
-    Returns
-    -------
-    List[Path]
-        Paths to created (or pre-existing) parquet files.
-    """
-    start = pd.Timestamp(start_date).date()
-    end = pd.Timestamp(end_date).date()
-    if end < start:
-        raise ValueError(f"end_date ({end_date}) must be >= start_date ({start_date})")
-
-    data_dir_path = Path(data_dir)
-    data_dir_path.mkdir(parents=True, exist_ok=True)
-
-    parquet_paths: List[Path] = []
-    missing_or_forced_days = []
-    for day in pd.date_range(start, end, freq="1D"):
-        ds = str(day.date())
-        stem = f"{exchange}_{data_type}_{ds}_{symbol}"
-        parquet_name = f"{stem}_{resample_freq}.parquet" if resample_freq else f"{stem}.parquet"
-        parquet_path = data_dir_path / parquet_name
-        parquet_paths.append(parquet_path)
-
-        if force_reload or (not parquet_path.exists()):
-            missing_or_forced_days.append(day)
-
-    if missing_or_forced_days:
-        download_to = str(end + pd.Timedelta(days=1))
-        datasets.download(
-            exchange=exchange,
-            data_types=[data_type],
-            from_date=str(start),
-            to_date=download_to,
-            symbols=[symbol],
-            download_dir=str(data_dir_path),
-            api_key=os.environ.get('TARDIS_API_KEY', None),
-        )
-        logger.info(
-            "Downloaded %s/%s/%s from %s to %s into %s",
-            exchange,
-            data_type,
-            symbol,
-            start_date,
-            end_date,
-            data_dir,
-        )
-
-
-    for day in pd.date_range(start, end, freq="1D"):
-        ds = str(day.date())
-        stem = f"{exchange}_{data_type}_{ds}_{symbol}"
-        csv_path = data_dir_path / f"{stem}.csv.gz"
-        parquet_name = f"{stem}_{resample_freq}.parquet" if resample_freq else f"{stem}.parquet"
-        parquet_path = data_dir_path / parquet_name
-
-        if parquet_path.exists() and not force_reload:
-            logger.debug("Parquet already exists and force_reload=False, skipping convert: %s", parquet_path)
-            continue
-
-        if not csv_path.exists():
-            logger.warning("Expected CSV not found (skip): %s", csv_path)
-            continue
-
-        _convert_csv_to_parquet(
-            data_type,
-            exchange,
-            ds,
-            csv_path,
-            parquet_path,
-            force_reload=force_reload,
-            resample_freq=resample_freq,
-
-        )
-
-        if cleanup_csv:
-            csv_path.unlink(missing_ok=True)
-
-    return parquet_paths
-
 def testme():
     paths = download_and_convert_streaming_resample(
         exchange="deribit",
@@ -929,8 +622,7 @@ def testme():
         start_date="2026-03-26",
         end_date="2026-03-26",
         data_dir="datasets/deribit",
-        force_reload=True ,
-        cleanup_csv=False,
+        force_reload=True,
         resample_freq='5min',
     )
     
@@ -980,12 +672,6 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Force conversion even if target parquet already exists",
     )
     parser.add_argument(
-        "--cleanup-csv",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Remove source CSV files after conversion (default: enabled)",
-    )
-    parser.add_argument(
         "--resample-freq",
         default=None,
         help="Optional resample frequency before parquet write (e.g. 1min, 5min)",
@@ -995,12 +681,6 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Global logging level (default: INFO)",
-    )
-    parser.add_argument(
-        "--use-streaming",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use the streaming implementation (default: enabled)",
     )
     parser.add_argument(
         "--peek",
@@ -1039,7 +719,7 @@ def _main() -> None:
     logger.info(
         "Parsed CLI args: exchange=%s data_type=%s symbol=%s"
         " start_date=%s end_date=%s data_dir=%s force_reload=%s"
-        " cleanup_csv=%s resample_freq=%s loglevel=%s use_streaming=%s"
+        " resample_freq=%s loglevel=%s"
         " peek=%s peek_rows=%s",
         args.exchange,
         args.data_type,
@@ -1048,10 +728,8 @@ def _main() -> None:
         args.end_date,
         args.data_dir,
         args.force_reload,
-        args.cleanup_csv,
         args.resample_freq,
         args.loglevel,
-        args.use_streaming,
         args.peek,
         args.peek_rows,
     )
@@ -1067,9 +745,7 @@ def _main() -> None:
         )
         return
     
-    fun = download_and_convert_streaming_resample if args.use_streaming else download_and_convert
-
-    paths = fun(
+    paths = download_and_convert_streaming_resample(
         exchange=args.exchange,
         data_type=args.data_type,
         symbol=args.symbol,
@@ -1077,7 +753,6 @@ def _main() -> None:
         end_date=args.end_date,
         data_dir=args.data_dir,
         force_reload=args.force_reload,
-        cleanup_csv=args.cleanup_csv,
         resample_freq=args.resample_freq,
     )
     for path in paths:

@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
-from tardis.download_files import download_and_convert
+from tardis.download_files import download_and_convert_streaming_resample
 
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,6 @@ class SampleConfig:
     freq: str = "5min"
     post_resample_freq: str | None = None
     force_reload: bool = False
-    cleanup_csv: bool = True
     cleanup_intermediate_parquet: bool = False
     timestamp_unit: str = TIMESTAMP_UNIT
 
@@ -481,13 +480,12 @@ def day_sample(day: str, exchange: str, config: SampleConfig = SampleConfig()) -
     """Download, normalize, resample, and align call/put/future/spot legs for one exchange/day."""
     align_freq = config.post_resample_freq or config.freq
     logger.debug(
-        "sample_day_options start exchange=%s day=%s freq=%s align_freq=%s force_reload=%s cleanup_csv=%s cleanup_intermediate_parquet=%s",
+        "sample_day_options start exchange=%s day=%s freq=%s align_freq=%s force_reload=%s cleanup_intermediate_parquet=%s",
         exchange,
         day,
         config.freq,
         align_freq,
         config.force_reload,
-        config.cleanup_csv,
         config.cleanup_intermediate_parquet,
     )
     recipe = EXCHANGE_DOWNLOADS.get(exchange)
@@ -504,9 +502,9 @@ def day_sample(day: str, exchange: str, config: SampleConfig = SampleConfig()) -
     trade_paths: list[Path] = []
     for ex, dt, sym in recipe["static"]:
         logger.debug("sample_day_options static_download exchange=%s data_type=%s symbol=%s day=%s", ex, dt, sym, day)
-        paths = download_and_convert(
+        paths = download_and_convert_streaming_resample(
             exchange=ex, data_type=dt, symbol=sym, start_date=day, end_date=day,
-            data_dir=config.data_dir, force_reload=config.force_reload, cleanup_csv=config.cleanup_csv,
+            data_dir=config.data_dir, force_reload=config.force_reload,
             resample_freq=config.freq)
         logger.debug("sample_day_options static_download_result symbol=%s files=%s", sym, [str(path) for path in paths])
         if dt in ['quotes','derivative_ticker']: quote_paths.extend(paths)
@@ -522,9 +520,9 @@ def day_sample(day: str, exchange: str, config: SampleConfig = SampleConfig()) -
 
     if recipe.get("futures_quotes_are_in_separate_files", False):
         ticker_ex, ticker_dt, ticker_sym = recipe["futures_ticker"]
-        ticker_path = download_and_convert(
+        ticker_path = download_and_convert_streaming_resample(
             exchange=ticker_ex, data_type=ticker_dt, symbol=ticker_sym, start_date=day, end_date=day,
-            data_dir=config.data_dir, force_reload=config.force_reload, cleanup_csv=config.cleanup_csv,
+            data_dir=config.data_dir, force_reload=config.force_reload,
             resample_freq=config.freq)
         logger.debug("sample_day_options futures_ticker_path=%s", ticker_path)
         fut_symbols = (
@@ -546,9 +544,9 @@ def day_sample(day: str, exchange: str, config: SampleConfig = SampleConfig()) -
         fut_ex, fut_dt = recipe["futures_quotes"]
         for fut_symbol in fut_symbols:
             logger.debug("sample_day_options futures_quote_download symbol=%s", fut_symbol)
-            quote_paths.extend(download_and_convert(
+            quote_paths.extend(download_and_convert_streaming_resample(
                 exchange=fut_ex, data_type=fut_dt, symbol=fut_symbol, start_date=day, end_date=day,
-                data_dir=config.data_dir, force_reload=config.force_reload, cleanup_csv=config.cleanup_csv,
+                data_dir=config.data_dir, force_reload=config.force_reload,
                 resample_freq=config.freq))
 
     logger.debug("sample_day_options quote_paths=%s", [str(path) for path in quote_paths])
