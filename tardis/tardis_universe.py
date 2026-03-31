@@ -55,12 +55,19 @@ def universe_data_types(exchange=None, exchange_regex=None):
 def universe_columns(
     exchange=None,
     exchange_regex=None,
+    symbol_type_regex=None,
     symbol_regex=None,
     stream_type_regex=None,
     date=None,
     head=None,
 ):
-    """Return a list of dicts for each matched stream file: exchange, symbol, stream_type, symbol_type, columns=[{column_name, polars_inferred_type}, ...]"""
+    """Return column previews for matched stream files.
+
+    Supports the same filters as the CLI columns command, including
+    symbol_type_regex to keep only symbols whose type matches the regex.
+    Output items include: exchange, symbol, stream_type, symbol_type,
+    columns=[{column_name, polars_inferred_type}, ...].
+    """
     import re
     exs = universe_exchanges(exchange_regex) if exchange_regex else ([exchange] if exchange else [])
     if not exs:
@@ -69,6 +76,7 @@ def universe_columns(
     for exch in exs if isinstance(exs[0], str) else [e["id"] for e in exs]:
         targets = _matched_stream_targets(
             exchange=exch,
+            symbol_type_regex=symbol_type_regex,
             symbol_regex=symbol_regex,
             stream_type_regex=stream_type_regex,
             date=date,
@@ -138,6 +146,7 @@ import json
 import argparse
 import gzip
 import pathlib
+import logging
 import requests
 from datetime import date as date_type
 from urllib.parse import urlencode
@@ -149,6 +158,10 @@ from urllib.parse import urlencode
 # Root for cached CSV previews; resolved relative to this file's package dir.
 _CACHE_DIR = pathlib.Path(__file__).parent.parent / "datasets" / "columns_cache"
 _CACHE_MAX_ROWS = 100
+logger = logging.getLogger(__name__)
+_LOG_LEVEL = os.environ.get("TARDIS_UNIVERSE_LOGLEVEL")
+if _LOG_LEVEL:
+    logging.basicConfig(level=getattr(logging, _LOG_LEVEL.upper(), logging.INFO))
 
 
 def _cache_path(exchange: str, stream_type: str, symbol: str) -> pathlib.Path:
@@ -156,20 +169,47 @@ def _cache_path(exchange: str, stream_type: str, symbol: str) -> pathlib.Path:
     return _CACHE_DIR / f"{exchange}-{stream_type}-{safe}-preview.csv"
 
 
+def _empty_cache_marker_path(exchange: str, stream_type: str, symbol: str) -> pathlib.Path:
+    safe = symbol.replace("/", "_").replace("\\", "_")
+    return _CACHE_DIR / f"{exchange}-{stream_type}-{safe}-preview.empty"
+
+
 def _read_cache(exchange: str, stream_type: str, symbol: str):
     """Return a polars.DataFrame from cache, or None if not present."""
     import polars as pl
+    empty_marker = _empty_cache_marker_path(exchange, stream_type, symbol)
+    if empty_marker.exists():
+        logger.debug("Cache hit (empty marker) for preview file: %s", empty_marker)
+        return pl.DataFrame()
+
     p = _cache_path(exchange, stream_type, symbol)
     if p.exists():
+        logger.debug("Cache hit for preview file: %s", p)
         return pl.read_csv(p, infer_schema_length=_CACHE_MAX_ROWS)
+    logger.debug("Cache miss for preview file: %s", p)
     return None
 
 
 def _write_cache(exchange: str, stream_type: str, symbol: str, df) -> pathlib.Path:
     """Write up to _CACHE_MAX_ROWS rows to the cache CSV and return the path."""
     p = _cache_path(exchange, stream_type, symbol)
+    empty_marker = _empty_cache_marker_path(exchange, stream_type, symbol)
     p.parent.mkdir(parents=True, exist_ok=True)
+    if empty_marker.exists():
+        empty_marker.unlink()
     df.head(_CACHE_MAX_ROWS).write_csv(p)
+    logger.debug("Wrote preview cache file: %s", p)
+    return p
+
+
+def _write_empty_cache_marker(exchange: str, stream_type: str, symbol: str) -> pathlib.Path:
+    p = _empty_cache_marker_path(exchange, stream_type, symbol)
+    csv_path = _cache_path(exchange, stream_type, symbol)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if csv_path.exists():
+        csv_path.unlink()
+    p.write_text("empty\n", encoding="utf-8")
+    logger.debug("Wrote empty preview cache marker: %s", p)
     return p
 
 try:
@@ -189,9 +229,13 @@ def _headers():
 
 
 def _get(url, params=None):
-    resp = requests.get(url, headers=_headers(), params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    logger.debug("About to hit endpoint: %s params=%s", url, params)
+    with requests.get(url, headers=_headers(), params=params, timeout=30) as resp:
+        logger.debug("Attached to endpoint: %s status=%s", url, resp.status_code)
+        resp.raise_for_status()
+        payload = resp.json()
+    logger.debug("Detached from endpoint: %s", url)
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -285,12 +329,20 @@ def _filtered_symbols(
     return symbols
 
 
-def _matched_stream_targets(exchange: str, symbol_regex=None, stream_type_regex=None, date=None, head=None):
+def _matched_stream_targets(
+    exchange: str,
+    symbol_type_regex=None,
+    symbol_regex=None,
+    stream_type_regex=None,
+    date=None,
+    head=None,
+):
     """Return a list of stream targets with a sample_day computed from the date filter or latest available day."""
     import datetime
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
     symbols = _filtered_symbols(
         exchange=exchange,
+        symbol_type_regex=symbol_type_regex,
         symbol_regex=symbol_regex,
         stream_type_regex=stream_type_regex,
         date=date,
@@ -343,12 +395,15 @@ def _stream_columns_head(
 ):
     """Return a transposed column preview for one downloadable stream file.
 
-    Checks the disk cache first (datasets/columns_cache/).  On a cache miss
-    fetches up to _CACHE_MAX_ROWS rows from Tardis and writes them to cache
-    so subsequent calls are free.
+    Checks the disk cache first (datasets/columns_cache/).  On a cache miss,
+    uses PyArrow streaming CSV reader to fetch only the first batch from Tardis
+    and caches it, so subsequent calls are free. This avoids loading the entire
+    file into memory.
     """
-    from .download_files import _tardis_csv_url
+    from .download_files import _tardis_csv_url, _temporal_fallback_column_types, _cast_temporal_fallback_columns, TARDIS_COLUMN_TYPES
     import polars as pl
+    import pyarrow.csv as pv
+    import pyarrow as pa
 
     sample_rows = max(0, sample_rows)
     day = date_type.fromisoformat((sample_day or "1970-01-01")[:10])
@@ -368,6 +423,7 @@ def _stream_columns_head(
     }
 
     try:
+        full = None
         # --- cache hit ---
         cached_df = _read_cache(exchange, stream_type, symbol)
         if cached_df is not None:
@@ -375,19 +431,75 @@ def _stream_columns_head(
             out["from_cache"] = True
             out["cache_path"] = str(_cache_path(exchange, stream_type, symbol))
         else:
-            # --- cache miss: fetch from HTTP ---
+            # --- cache miss: streaming fetch from HTTP ---
+            # Use PyArrow streaming reader to read only the first batch without
+            # loading the entire file into memory.
             api_key = os.environ.get("TARDIS_API_KEY", None)
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+            
+            # Setup PyArrow CSV reader options (same as in download_files)
+            read_options = pv.ReadOptions(block_size=8 * 1024 * 1024)
+            convert_options = pv.ConvertOptions(
+                column_types=_temporal_fallback_column_types(TARDIS_COLUMN_TYPES),
+                null_values=["", "null", "None", "NULL", "NaN", "nan"],
+            )
+            
+            logger.debug("About to hit streaming endpoint: %s", url)
             with requests.get(url, headers=headers, stream=True, timeout=120) as response:
-                response.raise_for_status()
-                response.raw.decode_content = True
-                with gzip.GzipFile(fileobj=response.raw) as gz:
-                    full = pl.read_csv(gz, n_rows=_CACHE_MAX_ROWS, ignore_errors=True)
+                logger.debug("Attached to streaming endpoint: %s status=%s", url, response.status_code)
+                try:
+                    response.raise_for_status()
+                    response.raw.decode_content = True
+                    with gzip.GzipFile(fileobj=response.raw) as gz:
+                        reader = pv.open_csv(gz, read_options=read_options, convert_options=convert_options)
+                        try:
+                            # Read only the first streamed batch using the same
+                            # pattern as tardis/download_files.py.
+                            first_batch = None
+                            for batch in reader:
+                                first_batch = batch
+                                break
+
+                            if first_batch is None:
+                                logger.debug("Streaming endpoint produced no CSV rows: %s", url)
+                                full = pl.DataFrame()
+                            else:
+                                arrow_table = pa.Table.from_batches([first_batch])
+                                full = pl.from_arrow(arrow_table)
+                                full = _cast_temporal_fallback_columns(full, TARDIS_COLUMN_TYPES)
+                                logger.debug(
+                                    "Materialized streamed preview chunk for %s/%s/%s with rows=%s cols=%s",
+                                    exchange,
+                                    stream_type,
+                                    symbol,
+                                    full.height,
+                                    len(full.columns),
+                                )
+                        finally:
+                            reader.close()
+                finally:
+                    logger.debug("Detached from streaming endpoint: %s", url)
+
+            if full is None:
+                logger.debug("No batch returned from streaming endpoint; treating as empty stream: %s", url)
+                full = pl.DataFrame()
 
             if full.is_empty():
                 out["error"] = "empty stream"
+                out["cache_path"] = str(_write_empty_cache_marker(exchange, stream_type, symbol))
                 return out
 
+            # Keep only the first min(streamed chunk rows, _CACHE_MAX_ROWS) rows
+            # for both current previewing and disk cache.
+            full = full.head(_CACHE_MAX_ROWS)
+            logger.debug(
+                "Persisting preview cache for %s/%s/%s with rows=%s (limit=%s)",
+                exchange,
+                stream_type,
+                symbol,
+                full.height,
+                _CACHE_MAX_ROWS,
+            )
             out["cache_path"] = str(_write_cache(exchange, stream_type, symbol, full))
 
         sample = full.head(max(1, sample_rows))
@@ -412,13 +524,25 @@ def _stream_columns_head(
         status = exc.response.status_code if exc.response is not None else "unknown"
         out["error"] = f"http error: {status}"
         return out
+    except pa.ArrowInvalid as exc:
+        # Empty CSV payloads can surface as Arrow parse errors before any batch exists.
+        msg = str(exc)
+        logger.debug("Arrow parse error while streaming %s: %s", url, msg)
+        if "empty" in msg.lower():
+            out["error"] = "empty stream"
+            out["cache_path"] = str(_write_empty_cache_marker(exchange, stream_type, symbol))
+            return out
+        out["error"] = msg
+        return out
     except Exception as exc:
+        logger.exception("Unexpected error while building preview for %s/%s/%s", exchange, stream_type, symbol)
         out["error"] = str(exc)
         return out
 
 
 def _matched_stream_columns_head(
     exchange: str,
+    symbol_type_regex=None,
     symbol_regex=None,
     stream_type_regex=None,
     date=None,
@@ -428,6 +552,7 @@ def _matched_stream_columns_head(
     """Return transposed column previews for matched downloadable stream files."""
     targets = _matched_stream_targets(
         exchange=exchange,
+        symbol_type_regex=symbol_type_regex,
         symbol_regex=symbol_regex,
         stream_type_regex=stream_type_regex,
         date=date,
@@ -534,6 +659,17 @@ def _print_key_info(info):
 # ---------------------------------------------------------------------------
 
 def _build_parser():
+    def _add_loglevel_arg(parser):
+        parser.add_argument(
+            "--loglevel",
+            default=None,
+            choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+            help=(
+                "Logging level for CLI execution. "
+                "When omitted, uses TARDIS_UNIVERSE_LOGLEVEL if set, otherwise WARNING."
+            ),
+        )
+
     p = argparse.ArgumentParser(
         prog="tardis_universe",
         description="Explore the Tardis downloadable CSV universe",
@@ -550,9 +686,10 @@ def _build_parser():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_loglevel_arg(p)
     sub = p.add_subparsers(dest="cmd")
 
-    sub.add_parser(
+    ex_p = sub.add_parser(
         "exchanges",
         help="List all dataset-capable exchanges",
         description=(
@@ -562,6 +699,7 @@ def _build_parser():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_loglevel_arg(ex_p)
 
     sym_p = sub.add_parser(
         "symbols",
@@ -582,6 +720,7 @@ def _build_parser():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_loglevel_arg(sym_p)
     group = sym_p.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--exchange",
@@ -650,6 +789,7 @@ def _build_parser():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_loglevel_arg(dt_p)
     group2 = dt_p.add_mutually_exclusive_group(required=True)
     group2.add_argument(
         "--exchange",
@@ -673,6 +813,7 @@ def _build_parser():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_loglevel_arg(col_p)
     group3 = col_p.add_mutually_exclusive_group(required=True)
     group3.add_argument(
         "--exchange",
@@ -681,6 +822,10 @@ def _build_parser():
     group3.add_argument(
         "--exchange-regex",
         help="Regex to match one or more exchanges by id.",
+    )
+    col_p.add_argument(
+        "--symbol-type-regex", dest="symbol_type_regex", default=None, metavar="REGEX",
+        help="Regex matched against the symbol type (e.g. option, future, perpetual, combo).",
     )
     col_p.add_argument(
         "--symbol-regex", dest="symbol_regex", default=None, metavar="REGEX",
@@ -703,7 +848,7 @@ def _build_parser():
         help="Dump column previews as JSON instead of pretty printed table.",
     )
 
-    sub.add_parser(
+    ki_p = sub.add_parser(
         "key-info",
         help="Show what your API key covers (exchanges, date ranges, data plan)",
         description=(
@@ -714,6 +859,7 @@ def _build_parser():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_loglevel_arg(ki_p)
 
     return p
 
@@ -721,6 +867,11 @@ def _build_parser():
 def main():
     parser = _build_parser()
     args = parser.parse_args()
+    effective_loglevel = (args.loglevel or os.environ.get("TARDIS_UNIVERSE_LOGLEVEL") or "WARNING").upper()
+    logging.basicConfig(
+        level=getattr(logging, effective_loglevel, logging.WARNING),
+        force=True,
+    )
 
     if args.cmd == "exchanges":
         exs = _list_exchanges(datasets_only=True)
@@ -777,6 +928,7 @@ def main():
             try:
                 previews = _matched_stream_columns_head(
                     exchange=exch,
+                    symbol_type_regex=args.symbol_type_regex,
                     symbol_regex=args.symbol_regex,
                     stream_type_regex=args.stream_type_regex,
                     date=args.date,
@@ -791,6 +943,7 @@ def main():
             else:
                 print(
                     f"\n{len(previews)} matched stream files for {exch}"
+                    + (f"  (symbol-type-regex={args.symbol_type_regex})" if args.symbol_type_regex else "")
                     + (f"  (symbol-regex={args.symbol_regex})" if args.symbol_regex else "")
                     + (f"  (stream-type-regex={args.stream_type_regex})" if args.stream_type_regex else "")
                     + (f"  (date={args.date})" if args.date else "")
