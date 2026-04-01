@@ -2,7 +2,7 @@ import sys
 sys.path.append('/my/TardisProject')
 
 from tardis.day_sample_options import day_sample, SampleConfig
-from tardis.pcp_metrics import compute_pcp_metrics
+from tardis.process_pcp import compute_pcp_metrics
 from tardis.implied_vol import compute_black_implied_vols
 import logging
 import pandas as pd
@@ -12,7 +12,7 @@ import argparse
 import glob
 import pyarrow as pa
 from datetime import datetime, timedelta
-from tardis.process import compact  # noqa: F401
+from tardis.process_pcp import compact  # noqa: F401
 from tardis.utils import _configure_logging
 
 

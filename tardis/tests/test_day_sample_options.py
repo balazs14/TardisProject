@@ -26,7 +26,7 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
 
     calls: dict[str, object] = {}
 
-    def fake_download_and_convert_streaming_resample(**kwargs):
+    def fake_download_resample(**kwargs):
         calls["download_resample_freq"] = kwargs["resample_freq"]
         return [quote_path]
 
@@ -62,7 +62,7 @@ def test_sample_day_options_uses_post_resample_freq_before_alignment(tmp_path, m
             }
         )
 
-    monkeypatch.setattr(dso, "download_and_convert_streaming_resample", fake_download_and_convert_streaming_resample)
+    monkeypatch.setattr(dso, "download_resample", fake_download_resample)
     monkeypatch.setattr(dso, "_normalize_quotes", fake_normalize_quotes)
     monkeypatch.setattr(dso, "_resample_normalized_quotes", fake_resample_normalized_quotes)
     monkeypatch.setattr(dso, "_align_calls_puts_with_legs", fake_align_calls_puts_with_legs)

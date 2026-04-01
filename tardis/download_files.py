@@ -156,7 +156,7 @@ def _build_tardis_column_types() -> dict[str, pa.DataType]:
     }
 
     # Book snapshot style columns (top levels).
-    for level in range(1, 101):
+    for level in range(101):
         types[f"bid_price_{level}"] = pa.float64()
         types[f"bid_amount_{level}"] = pa.float64()
         types[f"ask_price_{level}"] = pa.float64()
@@ -171,6 +171,11 @@ def _build_tardis_column_types() -> dict[str, pa.DataType]:
         types[f"bid{level}_amount"] = pa.float64()
         types[f"ask{level}_price"] = pa.float64()
         types[f"ask{level}_amount"] = pa.float64()
+
+        types[f"bids[{level}].price"] = pa.float64()
+        types[f"bids[{level}].amount"] = pa.float64()
+        types[f"asks[{level}].price"] = pa.float64()
+        types[f"asks[{level}].amount"] = pa.float64()
 
     return types
 
@@ -311,15 +316,41 @@ def _online_finalize_bucket_row(
     return row_out
 
 
-def download_and_convert_streaming_resample(
+def _normalize_symbols_input(symbols) -> list[str]:
+    """Normalize symbols input into a non-empty list of valid symbol strings.
+
+    Invalid symbol entries do not raise; they are skipped with logger.warning.
+    """
+    if isinstance(symbols, str):
+        candidates = [symbols]
+    elif isinstance(symbols, (list, tuple, set)):
+        candidates = list(symbols)
+    else:
+        logger.warning("Invalid symbols input type=%s; expected str or list-like", type(symbols).__name__)
+        return []
+
+    out: list[str] = []
+    for s in candidates:
+        if not isinstance(s, str):
+            logger.warning("Skipping invalid symbol %r (type=%s)", s, type(s).__name__)
+            continue
+        s_clean = s.strip()
+        if not s_clean:
+            logger.warning("Skipping invalid empty symbol entry: %r", s)
+            continue
+        out.append(s_clean)
+    return out
+
+
+def download_resample(
     exchange: str,
     data_type: str,
-    symbol: str,
+    symbols,
     start_date: str,
     end_date: str,
     data_dir: str = ".",
     force_reload: bool = False,
-    resample_freq: str = "1min",
+    resample_freq: str = "5min",
 ) -> List[Path]:
     """
     Stream Tardis CSV directly over HTTP and resample online per symbol bucket.
@@ -335,107 +366,113 @@ def download_and_convert_streaming_resample(
     data_dir_path = Path(data_dir)
     data_dir_path.mkdir(parents=True, exist_ok=True)
 
-    offset = pd.tseries.frequencies.to_offset(resample_freq)
     api_key = os.environ.get("TARDIS_API_KEY", None)
+    symbol_list = _normalize_symbols_input(symbols)
     parquet_paths: list[Path] = []
 
-    for day in pd.date_range(start, end, freq="1D"):
-        ds = str(day.date())
-        stem = f"{exchange}_{data_type}_{ds}_{symbol}"
-        parquet_path = data_dir_path / f"{stem}_{resample_freq}.parquet"
-        parquet_paths.append(parquet_path)
+    if not symbol_list:
+        logger.warning("No valid symbols provided for download_resample(exchange=%s, data_type=%s)", exchange, data_type)
+        return parquet_paths
 
-        if parquet_path.exists() and not force_reload:
-            logger.debug("Parquet already exists and force_reload=False, skipping: %s", parquet_path)
-            continue
-        if parquet_path.exists() and force_reload:
-            parquet_path.unlink(missing_ok=True)
+    for symbol in symbol_list:
+        for day in pd.date_range(start, end, freq="1D"):
+            ds = str(day.date())
+            stem = f"{exchange}_{data_type}_{ds}_{symbol}"
+            parquet_path = data_dir_path / f"{stem}_{resample_freq}.parquet"
+            parquet_paths.append(parquet_path)
 
-        url = _tardis_csv_url(exchange=exchange, data_type=data_type, day=day, symbol=symbol)
-        logger.info("Streaming download+resample from %s", url)
-
-        try:
-            resample_chunks: list[pl.DataFrame] = []
-            chunk_idx = 0
-            COMPACT_EVERY = 10  # merge accumulated chunks every N raw chunks to bound memory
-            for chunk_df in _iter_tardis_csv_rows_streaming(url, api_key=api_key):
-                logger.debug(f"Processing chunk {chunk_df}")
-                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                last_ts = chunk_df["timestamp"][-1] if "timestamp" in chunk_df.columns else None
-                logger.debug(
-                    "chunk %d: raw rows=%d cols=%d  last_ts=%s  rss=%.1f MB",
-                    chunk_idx, chunk_df.height, chunk_df.width, last_ts, rss_mb,
-                )
-                pldf = _cast_temporal_fallback_columns(chunk_df, TARDIS_COLUMN_TYPES)
-                if pldf.schema.get("timestamp") != pl.Datetime(TIMESTAMP_UNIT):
-                    pldf = pldf.with_columns(pl.col("timestamp").cast(pl.Datetime(TIMESTAMP_UNIT)))
-                logger.debug(f"data_type {data_type} ")
-                if data_type == "trades":
-                    logger.debug("Using trade-specific aggregation for chunk %d", chunk_idx)
-                    agg = _aggregate_resample_trade_chunk(pldf, freq=resample_freq, tscol="timestamp")
-                else:
-                    agg = _aggregate_resample_chunk(pldf, freq=resample_freq, tscol="timestamp")
-                if not agg.is_empty():
-                    resample_chunks.append(agg)
-                rss_mb_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                logger.debug(
-                    "chunk %d: agg rows=%d  chunks_so_far=%d  rss=%.1f MB (+%.1f MB)",
-                    chunk_idx, agg.height, len(resample_chunks), rss_mb_after, rss_mb_after - rss_mb,
-                )
-                # Periodically compact accumulated chunks to bound memory growth.
-                if len(resample_chunks) >= COMPACT_EVERY:
-                    merged = _merge_resample_aggregates(
-                        pl.concat(resample_chunks, rechunk=False), tscol="timestamp"
-                    )
-                    merged_last_ts = (
-                        merged.select(pl.col("timestamp").max()).item()
-                        if not merged.is_empty()
-                        else None
-                    )
-                    logger.info("merged(last compact) timestamp=%s", merged_last_ts)
-                    rss_mb_compact = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                    logger.debug(
-                        "chunk %d: compacted %d chunks → %d rows  rss=%.1f MB",
-                        chunk_idx, len(resample_chunks), merged.height, rss_mb_compact,
-                    )
-                    resample_chunks = [merged]
-                chunk_idx += 1
-        except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                logger.warning("No dataset found for %s (HTTP 404)", url)
-                pl.DataFrame().write_parquet(parquet_path)
+            if parquet_path.exists() and not force_reload:
+                logger.debug("Parquet already exists and force_reload=False, skipping: %s", parquet_path)
                 continue
-            raise
+            if parquet_path.exists() and force_reload:
+                parquet_path.unlink(missing_ok=True)
 
-        if not resample_chunks:
-            pl.DataFrame().write_parquet(parquet_path)
-            logger.info("Wrote empty parquet %s", parquet_path)
-            continue
+            url = _tardis_csv_url(exchange=exchange, data_type=data_type, day=day, symbol=symbol)
+            logger.info("Streaming download+resample from %s", url)
 
-        combined = pl.concat(resample_chunks, rechunk=False)
-        logger.debug(
-            "post-concat: %d chunks → %d rows  rss=%.1f MB",
-            len(resample_chunks), combined.height,
-            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
-        )
-        del resample_chunks
-        combined = _merge_resample_aggregates(combined, tscol="timestamp")
-        logger.debug(
-            "post-merge: %d rows  rss=%.1f MB",
-            combined.height, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
-        )
-        final_df = _expand_resampled_buckets(combined, freq=resample_freq, tscol="timestamp")
-        del combined
-        logger.debug(
-            "post-expand: %d rows  rss=%.1f MB",
-            final_df.height, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
-        )
-        # Sort columns alphabetically to match batch output
-        final_df = final_df.select(sorted(final_df.columns))
-        final_df.write_parquet(parquet_path)
-        logger.debug(f'wrote {parquet_path}')
+            try:
+                resample_chunks: list[pl.DataFrame] = []
+                chunk_idx = 0
+                COMPACT_EVERY = 10  # merge accumulated chunks every N raw chunks to bound memory
+                for chunk_df in _iter_tardis_csv_rows_streaming(url, api_key=api_key):
+                    logger.debug(f"Processing chunk {chunk_df}")
+                    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                    last_ts = chunk_df["timestamp"][-1] if "timestamp" in chunk_df.columns else None
+                    logger.debug(
+                        "chunk %d: raw rows=%d cols=%d  last_ts=%s  rss=%.1f MB",
+                        chunk_idx, chunk_df.height, chunk_df.width, last_ts, rss_mb,
+                    )
+                    pldf = _cast_temporal_fallback_columns(chunk_df, TARDIS_COLUMN_TYPES)
+                    if pldf.schema.get("timestamp") != pl.Datetime(TIMESTAMP_UNIT):
+                        pldf = pldf.with_columns(pl.col("timestamp").cast(pl.Datetime(TIMESTAMP_UNIT)))
+                    logger.debug("Aggregating chunk for data_type=%s chunk=%d", data_type, chunk_idx)
+                    agg = _aggregate_resample_chunk(
+                        data_type=data_type,
+                        df=pldf,
+                        freq=resample_freq,
+                        tscol="timestamp",
+                    )
+                    if not agg.is_empty():
+                        resample_chunks.append(agg)
+                    rss_mb_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                    logger.debug(
+                        "chunk %d: agg rows=%d  chunks_so_far=%d  rss=%.1f MB (+%.1f MB)",
+                        chunk_idx, agg.height, len(resample_chunks), rss_mb_after, rss_mb_after - rss_mb,
+                    )
+                    # Periodically compact accumulated chunks to bound memory growth.
+                    if len(resample_chunks) >= COMPACT_EVERY:
+                        merged = _merge_resample_aggregates(
+                            pl.concat(resample_chunks, rechunk=False), tscol="timestamp"
+                        )
+                        merged_last_ts = (
+                            merged.select(pl.col("timestamp").max()).item()
+                            if not merged.is_empty()
+                            else None
+                        )
+                        logger.info("merged(last compact) timestamp=%s", merged_last_ts)
+                        rss_mb_compact = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                        logger.debug(
+                            "chunk %d: compacted %d chunks → %d rows  rss=%.1f MB",
+                            chunk_idx, len(resample_chunks), merged.height, rss_mb_compact,
+                        )
+                        resample_chunks = [merged]
+                    chunk_idx += 1
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    logger.warning("No dataset found for symbol=%s (%s)", symbol, url)
+                    pl.DataFrame().write_parquet(parquet_path)
+                    continue
+                raise
 
-        logger.info("Finished streaming convert+resample %s", parquet_path)
+            if not resample_chunks:
+                pl.DataFrame().write_parquet(parquet_path)
+                logger.info("Wrote empty parquet %s", parquet_path)
+                continue
+
+            combined = pl.concat(resample_chunks, rechunk=False)
+            logger.debug(
+                "post-concat: %d chunks → %d rows  rss=%.1f MB",
+                len(resample_chunks), combined.height,
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+            )
+            del resample_chunks
+            combined = _merge_resample_aggregates(combined, tscol="timestamp")
+            logger.debug(
+                "post-merge: %d rows  rss=%.1f MB",
+                combined.height, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+            )
+            final_df = _expand_resampled_buckets(combined, freq=resample_freq, tscol="timestamp")
+            del combined
+            logger.debug(
+                "post-expand: %d rows  rss=%.1f MB",
+                final_df.height, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+            )
+            # Sort columns alphabetically to match batch output
+            final_df = final_df.select(sorted(final_df.columns))
+            final_df.write_parquet(parquet_path)
+            logger.debug(f'wrote {parquet_path}')
+
+            logger.info("Finished streaming convert+resample %s", parquet_path)
 
     return parquet_paths
 
@@ -486,7 +523,7 @@ def _resample_column_sets(columns: list[str], tscol: str = "timestamp") -> tuple
     return value_cols, last_cols, summed_cols
 
 
-def _aggregate_resample_chunk(df: pl.DataFrame, freq: str, tscol: str = "timestamp") -> pl.DataFrame:
+def _aggregate_resample_default_chunk(df: pl.DataFrame, freq: str, tscol: str = "timestamp") -> pl.DataFrame:
     if df.is_empty():
         return df
     polars_freq = _normalize_polars_freq(freq)
@@ -552,6 +589,35 @@ def _aggregate_resample_trade_chunk(df: pl.DataFrame, freq: str, tscol: str = "t
     )
 
 
+def _get_chunk_aggregator(data_type: str):
+    """Return the chunk aggregation function for a Tardis data type.
+
+    Keep the dispatch table explicit so future data types with custom
+    accumulator logic remain easy to add and review.
+    """
+    aggregators = {
+        "trades": _aggregate_resample_trade_chunk,
+    }
+    return aggregators.get(data_type, _aggregate_resample_default_chunk)
+
+
+def _aggregate_resample_chunk(
+    data_type: str,
+    df: pl.DataFrame,
+    freq: str,
+    tscol: str = "timestamp",
+) -> pl.DataFrame:
+    """Aggregate one streamed chunk using the strategy for ``data_type``.
+
+    This is the single dispatch entry point used by the streaming pipeline.
+    Data types with custom stateful or accumulator-based logic should provide
+    their own concrete aggregator and be registered in ``_get_chunk_aggregator``.
+    """
+    aggregator = _get_chunk_aggregator(data_type)
+    logger.debug("Using chunk aggregator %s for data_type=%s", aggregator.__name__, data_type)
+    return aggregator(df, freq=freq, tscol=tscol)
+
+
 def _expand_resampled_buckets(df: pl.DataFrame, freq: str, tscol: str = "timestamp") -> pl.DataFrame:
     if df.is_empty():
         return df
@@ -615,10 +681,10 @@ def _merge_resample_aggregates(df: pl.DataFrame, tscol: str = "timestamp") -> pl
     )
 
 def testme():
-    paths = download_and_convert_streaming_resample(
+    paths = download_resample(
         exchange="deribit",
         data_type="trades",
-        symbol="OPTIONS",
+        symbols="OPTIONS",
         start_date="2026-03-26",
         end_date="2026-03-26",
         data_dir="datasets/deribit",
@@ -745,10 +811,10 @@ def _main() -> None:
         )
         return
     
-    paths = download_and_convert_streaming_resample(
+    paths = download_resample(
         exchange=args.exchange,
         data_type=args.data_type,
-        symbol=args.symbol,
+        symbols=args.symbol,
         start_date=args.start_date,
         end_date=args.end_date,
         data_dir=args.data_dir,

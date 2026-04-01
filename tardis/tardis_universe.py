@@ -151,6 +151,8 @@ import requests
 from datetime import date as date_type
 from urllib.parse import urlencode
 
+from tardis.api_cache import cached_get
+
 # ---------------------------------------------------------------------------
 # Column-preview disk cache
 # ---------------------------------------------------------------------------
@@ -230,11 +232,8 @@ def _headers():
 
 def _get(url, params=None):
     logger.debug("About to hit endpoint: %s params=%s", url, params)
-    with requests.get(url, headers=_headers(), params=params, timeout=30) as resp:
-        logger.debug("Attached to endpoint: %s status=%s", url, resp.status_code)
-        resp.raise_for_status()
-        payload = resp.json()
-    logger.debug("Detached from endpoint: %s", url)
+    payload = cached_get(url, params=params, headers=_headers(), timeout=30)
+    logger.debug("Returned from endpoint (maybe cached): %s", url)
     return payload
 
 

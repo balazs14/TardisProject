@@ -2,7 +2,6 @@ import logging
 from pathlib import Path
 import numpy as np
 from zmq import log
-a
 from tardis.zipjoin_files import inspect_inputs, zip_join_parquets
 import sys
 from tardis.utils import _configure_logging
@@ -23,13 +22,25 @@ COLUMN_MAP = {
     "opt_ask": ("options", "ask_price"),
     "q_bid": ("quotes", "bid_price"),
     "q_ask": ("quotes", "ask_price"),
-    "trade_amount": None,
+    "trade_amount": ('trades', "trade_amount"),
 }
+
+
 
 OUT = Path("./deribit_joined_2026-03-26_5min.parquet")
 
+def testme():
+    _configure_logging("DEBUG")
+    inspect_inputs(SOURCES, symbol_limit=2, ts_limit=2)
+    zip_join_parquets(
+        sources=SOURCES,
+        column_map=COLUMN_MAP,
+        output_path=OUT,
+        join_keys=("timestamp", "symbol"),
+        join_type="inner",
+    )
 
-if __name__ == "__main__":
+def main():
     _loglevel = "INFO"
     if "--loglevel" in sys.argv:
         _i = sys.argv.index("--loglevel")
@@ -44,6 +55,11 @@ if __name__ == "__main__":
         sources=SOURCES,
         column_map=COLUMN_MAP,
         output_path=OUT,
-        join_keys=("timestamp", "symbol", "exchange"),
+        join_keys=("timestamp", "symbol"),
         join_type="inner",
     )
+
+
+if __name__ == "__main__":
+    main()
+

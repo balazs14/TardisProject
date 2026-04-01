@@ -61,10 +61,10 @@ def test_streaming_resample_creates_daily_parquets(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dac, "_iter_tardis_csv_rows_streaming", fake_iter)
 
-    parquet_paths = dac.download_and_convert_streaming_resample(
+    parquet_paths = dac.download_resample(
         exchange=exchange,
         data_type=data_type,
-        symbol=symbol,
+        symbols=symbol,
         start_date="2023-02-01",
         end_date="2023-02-02",
         data_dir=str(tmp_path),
@@ -80,10 +80,10 @@ def test_streaming_resample_creates_daily_parquets(tmp_path, monkeypatch):
 
 def test_streaming_resample_rejects_inverted_date_range(tmp_path):
     with pytest.raises(ValueError):
-        dac.download_and_convert_streaming_resample(
+        dac.download_resample(
             exchange="binance",
             data_type="trades",
-            symbol="BTCUSDT",
+            symbols="BTCUSDT",
             start_date="2023-02-05",
             end_date="2023-02-01",
             data_dir=str(tmp_path),
@@ -106,10 +106,10 @@ def test_streaming_resample_skips_existing_parquet(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dac, "_iter_tardis_csv_rows_streaming", fake_iter)
 
-    out = dac.download_and_convert_streaming_resample(
+    out = dac.download_resample(
         exchange=exchange,
         data_type=data_type,
-        symbol=symbol,
+        symbols=symbol,
         start_date="2023-02-01",
         end_date="2023-02-01",
         data_dir=str(tmp_path),
@@ -134,10 +134,10 @@ def test_streaming_resample_force_reload_overwrites(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dac, "_iter_tardis_csv_rows_streaming", fake_iter)
 
-    out = dac.download_and_convert_streaming_resample(
+    out = dac.download_resample(
         exchange=exchange,
         data_type=data_type,
-        symbol=symbol,
+        symbols=symbol,
         start_date="2023-02-01",
         end_date="2023-02-01",
         data_dir=str(tmp_path),
@@ -159,10 +159,10 @@ def test_streaming_resample_writes_empty_parquet_on_404(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dac, "_iter_tardis_csv_rows_streaming", fake_iter)
 
-    out = dac.download_and_convert_streaming_resample(
+    out = dac.download_resample(
         exchange="binance",
         data_type="quotes",
-        symbol="OPTIONS",
+        symbols="OPTIONS",
         start_date="2023-02-01",
         end_date="2023-02-01",
         data_dir=str(tmp_path),
@@ -184,10 +184,10 @@ def test_streaming_resample_resamples_multi_symbol_chunk_before_writing(tmp_path
 
     monkeypatch.setattr(dac, "_iter_tardis_csv_rows_streaming", fake_iter)
 
-    out = dac.download_and_convert_streaming_resample(
+    out = dac.download_resample(
         exchange=exchange,
         data_type=data_type,
-        symbol=symbol,
+        symbols=symbol,
         start_date="2023-02-01",
         end_date="2023-02-01",
         data_dir=str(tmp_path),
@@ -210,3 +210,29 @@ def test_streaming_resample_resamples_multi_symbol_chunk_before_writing(tmp_path
     assert df_a["bid_price"].head(3).to_list() == [101.0, 101.0, 103.0]
     assert df_a["volume"].head(3).to_list() == [3.0, None, 3.0]
     assert df_a["stale"].head(3).to_list() == [False, True, False]
+
+
+def test_download_resample_accepts_symbol_list_and_skips_invalid_entries(tmp_path, monkeypatch, caplog):
+    exchange = "binance"
+    data_type = "trades"
+
+    def fake_iter(url, api_key=None):
+        yield _trades_chunk(exchange, "BTCUSDT")
+
+    monkeypatch.setattr(dac, "_iter_tardis_csv_rows_streaming", fake_iter)
+
+    out = dac.download_resample(
+        exchange=exchange,
+        data_type=data_type,
+        symbols=["BTCUSDT", "", None, "ETHUSDT"],
+        start_date="2023-02-01",
+        end_date="2023-02-01",
+        data_dir=str(tmp_path),
+        resample_freq="1min",
+    )
+
+    assert len(out) == 2
+    assert all(p.exists() for p in out)
+    warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any("Skipping invalid empty symbol entry" in m for m in warning_messages)
+    assert any("Skipping invalid symbol" in m for m in warning_messages)

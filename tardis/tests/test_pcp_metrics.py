@@ -3,7 +3,7 @@ import polars as pl
 import pytest
 
 from tardis import test_utils as tu
-from tardis.pcp_metrics import compute_pcp_metrics
+from tardis.process_pcp import compute_pcp_metrics
 
 
 @pytest.fixture
