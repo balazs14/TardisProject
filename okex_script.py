@@ -183,7 +183,6 @@ if execute and pcpb_polars is not None:
     summary_df = summarize_options_sample(pcpb_polars)
     summary_df_display = summary_df.round(0).astype("Int64")
 
-display(summary_df_display)
 if summary_df_display is not None:
     import matplotlib.pyplot as plt
 

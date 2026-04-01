@@ -11,6 +11,8 @@ import pymysql
 import pandas as pd
 import numpy as np
 import pickle
+import glob
+import signal
 
 class ParameterError(Exception):
     pass
@@ -325,7 +327,7 @@ def cached_member(func):
         if path is None:
             result = func(*args, **kwargs)
             return result
-        
+        recreate=False
         # If the file exists, load cache
         if os.path.exists(path) and not recreate:
             with open(path, "rb") as f:
