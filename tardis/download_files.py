@@ -19,6 +19,7 @@ from tardis.utils import _configure_logging
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_RESAMPLE_FREQ = "5min"
 
 # Use microsecond resolution for all timestamps
 TIMESTAMP_UNIT = 'us'
@@ -89,6 +90,7 @@ def _build_tardis_column_types() -> dict[str, pa.DataType]:
 
         # Options / derivatives
         "strike": pa.float64(),
+        "strike_price": pa.float64(),
         "expiration": pa.timestamp(TIMESTAMP_UNIT),
         "expiry": pa.timestamp(TIMESTAMP_UNIT),
         "delivery_price": pa.float64(),
@@ -359,7 +361,7 @@ def download_resample(
     end_date: str | None = None,
     data_dir: str|None = None,
     force_reload: bool = False,
-    resample_freq: str = "5min",
+    resample_freq: str = DEFAULT_RESAMPLE_FREQ,
 ) -> List[Path]:
     """
     Stream Tardis CSV directly over HTTP and resample online per symbol bucket.
@@ -496,6 +498,7 @@ def peek_streaming_raw(
     end_date: str | None = None,
     *,
     head_rows: int = 10,
+    transpose_preview: bool = True,
 ) -> None:
     end_date = end_date or start_date
     start = pd.Timestamp(start_date).date()
@@ -517,7 +520,12 @@ def peek_streaming_raw(
             logger.info("peek: day=%s rows_in_first_chunk=%d cols=%d", day.date(), first_chunk.height, first_chunk.width)
             logger.info("peek columns: %s", first_chunk.columns)
             logger.info("peek inferred schema: %s", first_chunk.schema)
-            logger.info(first_chunk.head(head_rows))
+            logger.info(
+                "peek preview (%s, first %d rows):\n%s",
+                "transposed" if transpose_preview else "table",
+                head_rows,
+                _format_peek_preview(first_chunk, head_rows, transpose_preview=transpose_preview),
+            )
             return
         except requests.HTTPError as exc:
             if _is_missing_dataset_http_error(exc):
@@ -527,6 +535,13 @@ def peek_streaming_raw(
             raise
 
     logger.warning("peek: no available data found in requested range")
+
+
+def _format_peek_preview(df: pl.DataFrame, head_rows: int, *, transpose_preview: bool = True) -> str:
+    preview = df.head(head_rows).to_pandas()
+    if transpose_preview:
+        preview = preview.transpose()
+    return preview.to_string(max_rows=None, max_cols=None)
 
 
 def _resample_column_sets(columns: list[str], tscol: str = "timestamp") -> tuple[list[str], list[str], list[str]]:
@@ -753,8 +768,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--resample-freq",
-        default=None,
-        help="Optional resample frequency before parquet write (e.g. 1min, 5min)",
+        default=DEFAULT_RESAMPLE_FREQ,
+        help="Resample frequency before parquet write (e.g. 1min, 5min)",
     )
     parser.add_argument(
         "--loglevel",
@@ -772,6 +787,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Number of rows to print in --peek mode",
+    )
+    parser.add_argument(
+        "--peek-transposed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Display --peek preview transposed so all columns are visible",
     )
     return parser
 
@@ -794,12 +815,13 @@ def _set_global_loglevel(loglevel: str) -> None:
 
 def run_cli_args(args: argparse.Namespace) -> None:
     args.end_date = args.end_date or args.start_date
+    args.resample_freq = args.resample_freq or DEFAULT_RESAMPLE_FREQ
     _set_global_loglevel(args.loglevel)
     logger.info(
         "Parsed CLI args: exchange=%s data_type=%s symbol=%s"
         " start_date=%s end_date=%s data_dir=%s force_reload=%s"
         " resample_freq=%s loglevel=%s"
-        " peek=%s peek_rows=%s",
+        " peek=%s peek_rows=%s peek_transposed=%s",
         args.exchange,
         args.data_type,
         args.symbol,
@@ -811,6 +833,7 @@ def run_cli_args(args: argparse.Namespace) -> None:
         args.loglevel,
         args.peek,
         args.peek_rows,
+        args.peek_transposed,
     )
 
     if args.peek:
@@ -821,6 +844,7 @@ def run_cli_args(args: argparse.Namespace) -> None:
             start_date=args.start_date,
             end_date=args.end_date,
             head_rows=args.peek_rows,
+            transpose_preview=args.peek_transposed,
         )
         return
     
