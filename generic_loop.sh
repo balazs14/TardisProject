@@ -126,10 +126,10 @@ from datetime import date, timedelta
 
 s = date.fromisoformat(sys.argv[1])
 e = date.fromisoformat(sys.argv[2])
-d = s
-while d <= e:
+d = e
+while d >= s:
     print(d.isoformat())
-    d += timedelta(days=1)
+    d -= timedelta(days=1)
 PY
 ); do
     (

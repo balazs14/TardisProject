@@ -1,6 +1,24 @@
+import argparse
 import logging
 import sys
 import os
+
+
+class _CliHelpFormatter(argparse.HelpFormatter):
+    """Show [required] prefix for required options; show (default: X) for non-None defaults."""
+
+    def _get_help_string(self, action):
+        help_str = action.help or ""
+        if getattr(action, "required", False):
+            return "[required]  " + help_str
+        if (
+            action.default not in (None, argparse.SUPPRESS)
+            and "%(default)" not in help_str
+            and "default" not in help_str.lower()
+        ):
+            if action.option_strings or action.nargs in (argparse.OPTIONAL, argparse.ZERO_OR_MORE):
+                help_str += " (default: %(default)s)"
+        return help_str
 
 global_simulation_ts = None
 

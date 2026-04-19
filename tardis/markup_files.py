@@ -130,13 +130,13 @@ def _deribit_quotes_options_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr]
     """Convert Deribit options quote/trade symbols to markup expressions.
     
     Pattern: ROOT-DDMMMYY-STRIKETOKEN-PC
-    Example: XRP_USDC-27MAR26-1D375-P
+    Example: XRP_USDC-27MAR26-1D375-P or AVAX_USDC-16APR26-9-P
     Where ROOT can be CUR1_CUR2 or just CUR1 (defaults CUR2 to USD)
-    And STRIKETOKEN uses D as decimal separator: 1D375 = 1.375
+    And STRIKETOKEN is either an integer (9) or uses D as decimal separator (1D375 = 1.375)
     """
     symbol = pl.col("symbol").cast(pl.String)
-    assert df.select(symbol.str.contains(r"^[A-Z_0-9]+-\d{1,2}[A-Z]{3}\d{2}-\d+D\d+-[CP]$").all()).item(), \
-        "deribit option pattern expected: XRP_USDC-27MAR26-1D375-P"
+    assert df.select(symbol.str.contains(r"^[A-Z_0-9]+-\d{1,2}[A-Z]{3}\d{2}-\d+(?:D\d+)?-[CP]$").all()).item(), \
+        "deribit option pattern expected: XRP_USDC-27MAR26-1D375-P or AVAX_USDC-16APR26-9-P"
     
     markup_columns = ("CUR1", "CUR2", "exp", "exp_str", "strike", "pc", "type", "ref_sym", "fut_sym", "spot_sym", "inverse")
 
@@ -147,13 +147,8 @@ def _deribit_quotes_options_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr]
     strike_token = parts.list.get(2)  # e.g., "1D375"
     pc = parts.list.get(3)  # e.g., "P"
 
-    # Parse strike: "1D375" -> split on "D" -> ["1", "375"] -> "1.375" -> float
-    strike_parts = strike_token.str.split_exact("D", n=1)
-    strike = pl.concat_str([
-        strike_parts.struct.field("field_0"),
-        pl.lit("."),
-        strike_parts.struct.field("field_1")
-    ]).cast(pl.Float64)
+    # Parse strike token: integer "9" or decimal token "1D375" -> "1.375".
+    strike = strike_token.str.replace("D", ".").cast(pl.Float64)
 
     # Parse CUR1_CUR2 from root: split on "_", default CUR2 to USD if not present
     root_parts = root.str.split_exact("_", n=1)
@@ -224,6 +219,54 @@ def _deribit_quotes_futures_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr]
 def _deribit_trades_future_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr], tuple[str, ...]]:
     """Convert Deribit trades futures symbols to markup expressions."""
     return _deribit_quotes_futures_markup(df)
+
+
+def _deribit_derivative_ticker_future_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr], tuple[str, ...]]:
+    """Convert Deribit derivative_ticker futures symbols to markup expressions.
+
+    Uses the same symbol parsing as Deribit futures quotes and sets top-of-book
+    fields from mark_price.
+    """
+    symbol = pl.col("symbol").cast(pl.String)
+    assert df.select(symbol.str.contains(r"^[A-Z_0-9]+-\d{1,2}[A-Z]{3}\d{2}$").all()).item(), \
+        "deribit future pattern expected: ETH_USDC-6MAR26 or ETH-6MAR26"
+
+    markup_columns = (
+        "CUR1",
+        "CUR2",
+        "exp",
+        "exp_str",
+        "ref_sym",
+        "spot_sym",
+        "inverse",
+        "bid_price",
+        "ask_price",
+        "bid_amount",
+        "ask_amount",
+    )
+
+    parts = symbol.str.split("-")
+    root = parts.list.get(0)
+    exp_str = parts.list.get(1)
+
+    root_parts = root.str.split_exact("_", n=1)
+    cur1 = root_parts.struct.field("field_0")
+    cur2 = pl.coalesce([root_parts.struct.field("field_1"), pl.lit("USD")])
+
+    expr_map = {
+        "CUR1": cur1,
+        "CUR2": cur2,
+        "exp": exp_str.str.strptime(pl.Datetime("us"), format="%d%b%y", strict=True),
+        "exp_str": exp_str,
+        "ref_sym": pl.when(cur2.str.to_uppercase().str.starts_with("USD")).then(pl.concat_str([cur1, pl.lit("USD")])).otherwise(pl.concat_str([cur1, cur2])),
+        "spot_sym": pl.concat_str([cur1, pl.lit("-"), cur2]),
+        "inverse": pl.lit(True),
+        "bid_price": pl.col("mark_price"),
+        "ask_price": pl.col("mark_price"),
+        "bid_amount": pl.lit(None, dtype=pl.Float64),
+        "ask_amount": pl.lit(None, dtype=pl.Float64),
+    }
+    return expr_map, markup_columns
 
 
 def _deribit_quotes_spot_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr], tuple[str, ...]]:
@@ -324,6 +367,10 @@ def _infer_symbol_markup(
             ("deribit", "trades", "spot"),
         }:
             return _deribit_trades_spot_markup(df)
+        if key3 in {
+            ("deribit", "derivative_ticker", "future"),
+        }:
+            return _deribit_derivative_ticker_future_markup(df)
         return _default_symbol_markup()
     return _default_symbol_markup()
 
@@ -363,7 +410,14 @@ def mark_up(
     return df.with_columns([markup_expr[name].alias(name) for name in markup_columns])
 
 
-def access_files(exchange, datatype, date, symbol_list, sample_freq: str = "5min"):
+def access_files(
+    exchange,
+    datatype,
+    date,
+    symbol_list,
+    sample_freq: str = "5min",
+    raw_data_dir: str | None = None,
+):
     """Return concatenated downloaded data and discovered symbols.
 
     Returns
@@ -374,6 +428,8 @@ def access_files(exchange, datatype, date, symbol_list, sample_freq: str = "5min
         - symbols discovered in the produced parquet file(s)
     """
 
+    data_dir = raw_data_dir if raw_data_dir is not None else f"datasets/{exchange}_raw/"
+
     parquet_paths = download_resample(
         exchange=exchange,
         data_type=datatype,
@@ -381,6 +437,7 @@ def access_files(exchange, datatype, date, symbol_list, sample_freq: str = "5min
         start_date=date,
         end_date=date,
         resample_freq=sample_freq,
+        data_dir=data_dir,
     )
 
     frames: list[pl.DataFrame] = []

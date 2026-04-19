@@ -248,6 +248,47 @@ def test_mark_up_deribit_trades_future_ref_sym_uses_cur1cur2_for_non_usd_prefix(
     assert out.get_column("inverse").to_list() == [True]
 
 
+def test_mark_up_deribit_derivative_ticker_future_sets_mark_price_to_bid_ask():
+    df = pl.DataFrame(
+        {
+            "symbol": ["ETH-6MAR26"],
+            "timestamp": [1],
+            "mark_price": [1964.69],
+        }
+    )
+
+    out = mf.mark_up(df, exchange="deribit", data_type="derivative_ticker", symbol_type="future")
+
+    assert out.get_column("CUR1").to_list() == ["ETH"]
+    assert out.get_column("CUR2").to_list() == ["USD"]
+    assert out.get_column("exp_str").to_list() == ["6MAR26"]
+    assert out.get_column("ref_sym").to_list() == ["ETHUSD"]
+    assert out.get_column("inverse").to_list() == [True]
+    assert out.get_column("bid_price") .to_list() == [1964.69]
+    assert out.get_column("ask_price").to_list() == [1964.69]
+    assert out.get_column("bid_amount").to_list() == [None]
+    assert out.get_column("ask_amount").to_list() == [None]
+
+
+def test_mark_up_deribit_derivative_ticker_future_usdc_keeps_future_markup_fields():
+    df = pl.DataFrame(
+        {
+            "symbol": ["ETH_USDC-27MAR26"],
+            "timestamp": [1],
+            "mark_price": [2000.0],
+        }
+    )
+
+    out = mf.mark_up(df, exchange="deribit", data_type="derivative_ticker", symbol_type="future")
+
+    assert out.get_column("CUR1").to_list() == ["ETH"]
+    assert out.get_column("CUR2").to_list() == ["USDC"]
+    assert out.get_column("ref_sym").to_list() == ["ETHUSD"]
+    assert out.get_column("spot_sym").to_list() == ["ETH-USDC"]
+    assert out.get_column("bid_price").to_list() == [2000.0]
+    assert out.get_column("ask_price").to_list() == [2000.0]
+
+
 def test_mark_up_deribit_quotes_option_parses_d_strike_and_defaults_cur2():
     df = pl.DataFrame(
         {
@@ -267,6 +308,26 @@ def test_mark_up_deribit_quotes_option_parses_d_strike_and_defaults_cur2():
     assert out.get_column("fut_sym").to_list() == ["XRP_USDC-2MAR26", "ETH-27MAR26"]
     assert out.get_column("spot_sym").to_list() == ["XRP_USDC", "ETH_USDC"]
     assert out.get_column("inverse").to_list() == [True, True]
+
+
+def test_mark_up_deribit_quotes_option_parses_integer_strike_tokens():
+    """Regression: Deribit options can use integer strikes like "...-9-P"."""
+    df = pl.DataFrame(
+        {
+            "symbol": ["AVAX_USDC-16APR26-9-P", "ETH-27MAR26-2000-C"],
+            "timestamp": [1, 2],
+        }
+    )
+
+    out = mf.mark_up(df, exchange="deribit", data_type="quotes", symbol_type="option")
+
+    assert out.get_column("CUR1").to_list() == ["AVAX", "ETH"]
+    assert out.get_column("CUR2").to_list() == ["USDC", "USD"]
+    assert out.get_column("exp_str").to_list() == ["16APR26", "27MAR26"]
+    assert out.get_column("strike").to_list() == [9.0, 2000.0]
+    assert out.get_column("pc").to_list() == ["P", "C"]
+    assert out.get_column("fut_sym").to_list() == ["AVAX_USDC-16APR26", "ETH-27MAR26"]
+    assert out.get_column("spot_sym").to_list() == ["AVAX_USDC", "ETH_USDC"]
 
 
 def test_mark_up_deribit_quotes_option_ref_sym_uses_cur1cur2_for_non_usd_prefix():

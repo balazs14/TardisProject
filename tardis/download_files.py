@@ -2,6 +2,8 @@ import argparse
 import logging
 import os
 import resource
+
+from tardis import _CliHelpFormatter
 import gzip
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -342,13 +344,20 @@ def _normalize_symbols_input(symbols) -> list[str]:
     return out
 
 
+def _is_missing_dataset_http_error(exc: requests.HTTPError) -> bool:
+    """Return True when an HTTP error indicates the dataset file is unavailable."""
+    if exc.response is None:
+        return False
+    return exc.response.status_code in {400, 404}
+
+
 def download_resample(
     exchange: str,
     data_type: str,
     symbols,
     start_date: str,
-    end_date: str,
-    data_dir: str = ".",
+    end_date: str | None = None,
+    data_dir: str|None = None,
     force_reload: bool = False,
     resample_freq: str = "5min",
 ) -> List[Path]:
@@ -358,12 +367,13 @@ def download_resample(
     This function avoids persisting raw CSV files and performs bucket aggregation
     as rows are being downloaded. It assumes rows are timestamp-ordered.
     """
+    end_date = end_date or start_date
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
     if end < start:
         raise ValueError(f"end_date ({end_date}) must be >= start_date ({start_date})")
 
-    data_dir_path = Path(data_dir)
+    data_dir_path = Path(data_dir) if data_dir is not None else Path(f"datasets/{exchange}_raw")  
     data_dir_path.mkdir(parents=True, exist_ok=True)
 
     api_key = os.environ.get("TARDIS_API_KEY", None)
@@ -438,8 +448,9 @@ def download_resample(
                         resample_chunks = [merged]
                     chunk_idx += 1
             except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 404:
-                    logger.warning("No dataset found for symbol=%s (%s)", symbol, url)
+                if _is_missing_dataset_http_error(exc):
+                    status = exc.response.status_code if exc.response is not None else "unknown"
+                    logger.warning("No dataset found for symbol=%s (%s) [HTTP %s]", symbol, url, status)
                     pl.DataFrame().write_parquet(parquet_path)
                     continue
                 raise
@@ -482,10 +493,11 @@ def peek_streaming_raw(
     data_type: str,
     symbol: str,
     start_date: str,
-    end_date: str,
+    end_date: str | None = None,
     *,
     head_rows: int = 10,
 ) -> None:
+    end_date = end_date or start_date
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
     if end < start:
@@ -508,8 +520,9 @@ def peek_streaming_raw(
             logger.info(first_chunk.head(head_rows))
             return
         except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                logger.warning("peek: no dataset found for %s (HTTP 404)", url)
+            if _is_missing_dataset_http_error(exc):
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                logger.warning("peek: no dataset found for %s (HTTP %s)", url, status)
                 continue
             raise
 
@@ -695,9 +708,10 @@ def testme():
     return paths
 
 
-def _build_cli_parser() -> argparse.ArgumentParser:
+def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Download Tardis CSV data and convert it to parquet."
+        description="Download Tardis CSV data and convert it to parquet.",
+        formatter_class=_CliHelpFormatter,
     )
     parser.add_argument(
         "--exchange",
@@ -723,9 +737,9 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--end-date",
-        required=True,
+        default=None,
         dest="end_date",
-        help="Inclusive end date (YYYY-MM-DD)",
+        help="Inclusive end date (YYYY-MM-DD). Defaults to --start-date when omitted.",  # keep explicit: None default would be suppressed
     )
     parser.add_argument(
         "--data-dir",
@@ -746,7 +760,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "--loglevel",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Global logging level (default: INFO)",
+        help="Logging level",
     )
     parser.add_argument(
         "--peek",
@@ -757,7 +771,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "--peek-rows",
         type=int,
         default=10,
-        help="Number of rows to print in --peek mode (default: 10)",
+        help="Number of rows to print in --peek mode",
     )
     return parser
 
@@ -778,9 +792,8 @@ def _set_global_loglevel(loglevel: str) -> None:
             handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
 
 
-def _main() -> None:
-    parser = _build_cli_parser()
-    args = parser.parse_args()
+def run_cli_args(args: argparse.Namespace) -> None:
+    args.end_date = args.end_date or args.start_date
     _set_global_loglevel(args.loglevel)
     logger.info(
         "Parsed CLI args: exchange=%s data_type=%s symbol=%s"
@@ -824,7 +837,11 @@ def _main() -> None:
     for path in paths:
         logger.debug(path)
 
-if __name__ == "__main__": 
-    _main()
+
+def run_cli(argv: list[str] | None = None) -> None:
+    parser = build_cli_parser()
+    args = parser.parse_args(argv)
+    run_cli_args(args)
+
 
 
