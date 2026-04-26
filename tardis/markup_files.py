@@ -25,8 +25,23 @@ def _okex_options_quotes_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr], t
     Pattern: CUR1-CUR2-YYMMDD-STRIKE-PC
     Example: ETH-USD-260529-1600-P
     """
-    assert df.select(pl.col("symbol").cast(pl.String).str.contains(r"^[A-Z0-9]+-[A-Z0-9]+-\d{6}-\d+(?:\.\d+)?-[CP]$").all()).item(), \
-        "okex-options option pattern expected: ETH-USD-260529-1600-P"
+    pattern = r"^[A-Z0-9]+-[A-Z0-9]+-\d{6}-\d+(?:\.\d+)?-[CP]$"
+    symbol_col = pl.col("symbol").cast(pl.String)
+    if not df.select(symbol_col.str.contains(pattern).all()).item():
+        invalid_symbols = (
+            df.filter(~symbol_col.str.contains(pattern))
+            .get_column("symbol")
+            .cast(pl.String)
+            .unique()
+            .to_list()
+        )
+        if invalid_symbols:
+            logger.warning(
+                "OKEX option symbols not matching regex (%d): %s",
+                len(invalid_symbols),
+                invalid_symbols,
+            )
+        assert False, "okex-options option pattern expected: ETH-USD-260529-1600-P"
     
     markup_columns = ("CUR1", "CUR2", "exp", "exp_str", "strike", "pc", "type", "ref_sym", "fut_sym", "spot_sym", "inverse")
     symbol = pl.col("symbol").cast(pl.String)
@@ -135,8 +150,25 @@ def _deribit_quotes_options_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr]
     And STRIKETOKEN is either an integer (9) or uses D as decimal separator (1D375 = 1.375)
     """
     symbol = pl.col("symbol").cast(pl.String)
-    assert df.select(symbol.str.contains(r"^[A-Z_0-9]+-\d{1,2}[A-Z]{3}\d{2}-\d+(?:D\d+)?-[CP]$").all()).item(), \
-        "deribit option pattern expected: XRP_USDC-27MAR26-1D375-P or AVAX_USDC-16APR26-9-P"
+    pattern = r"^[A-Z_0-9]+-\d{1,2}[A-Z]{3}\d{2}-\d+(?:[dD]\d+)?-[CP]$"
+    if not df.select(symbol.str.contains(pattern).all()).item():
+        logger.warning("deribit option pattern expected: XRP_USDC-27MAR26-1D375-P or AVAX_USDC-16APR26-9-P; skipping markup")
+        invalid_symbols = (
+            df.filter(~symbol.str.contains(pattern))
+            .get_column("symbol")
+            .cast(pl.String)
+            .unique()
+            .to_list()
+        )
+        if invalid_symbols:
+            preview = invalid_symbols[:20]
+            logger.warning(
+            "Deribit option symbols not matching regex (%d): %s%s",
+            len(invalid_symbols),
+            preview,
+            " ..." if len(invalid_symbols) > 20 else "",
+            )
+        assert False, "deribit option pattern expected: XRP_USDC-27MAR26-1D375-P or AVAX_USDC-16APR26-9-P"
     
     markup_columns = ("CUR1", "CUR2", "exp", "exp_str", "strike", "pc", "type", "ref_sym", "fut_sym", "spot_sym", "inverse")
 
@@ -148,7 +180,7 @@ def _deribit_quotes_options_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr]
     pc = parts.list.get(3)  # e.g., "P"
 
     # Parse strike token: integer "9" or decimal token "1D375" -> "1.375".
-    strike = strike_token.str.replace("D", ".").cast(pl.Float64)
+    strike = strike_token.str.replace("D", ".").str.replace("d", ".").cast(pl.Float64)
 
     # Parse CUR1_CUR2 from root: split on "_", default CUR2 to USD if not present
     root_parts = root.str.split_exact("_", n=1)
