@@ -374,3 +374,96 @@ def test_download_files_cli_args_pass_5min_when_resample_freq_omitted(monkeypatc
     dac.run_cli_args(args)
 
     assert calls["resample_freq"] == dac.DEFAULT_RESAMPLE_FREQ
+
+
+def test_download_files_cli_parser_defaults_raw_to_false():
+    parser = dac.build_cli_parser()
+
+    args = parser.parse_args(
+        [
+            "--exchange", "deribit",
+            "--data-type", "quotes",
+            "--symbol", "OPTIONS",
+            "--start-date", "2023-02-01",
+        ]
+    )
+
+    assert args.raw is False
+
+
+def test_download_files_cli_args_dispatch_to_raw_download(monkeypatch):
+    called: dict[str, object] = {}
+
+    def fake_download_raw_csv_gz(**kwargs):
+        called.update(kwargs)
+        return []
+
+    def fake_download_resample(**kwargs):
+        raise AssertionError("download_resample should not be called in --raw mode")
+
+    monkeypatch.setattr(dac, "download_raw_csv_gz", fake_download_raw_csv_gz)
+    monkeypatch.setattr(dac, "download_resample", fake_download_resample)
+
+    parser = dac.build_cli_parser()
+    args = parser.parse_args(
+        [
+            "--exchange", "deribit",
+            "--data-type", "quotes",
+            "--symbol", "OPTIONS",
+            "--start-date", "2023-02-01",
+            "--raw",
+        ]
+    )
+
+    dac.run_cli_args(args)
+
+    assert called["exchange"] == "deribit"
+    assert called["data_type"] == "quotes"
+    assert called["symbols"] == "OPTIONS"
+    assert called["start_date"] == "2023-02-01"
+    assert called["end_date"] == "2023-02-01"
+
+
+def test_download_raw_csv_gz_saves_files(tmp_path, monkeypatch):
+    captured_calls: list[tuple[str, Path, str | None]] = []
+
+    def fake_download(url: str, destination: Path, api_key: str | None):
+        captured_calls.append((url, destination, api_key))
+        destination.write_bytes(b"fake gz bytes")
+
+    monkeypatch.setattr(dac, "_download_url_to_file", fake_download)
+
+    out = dac.download_raw_csv_gz(
+        exchange="deribit",
+        data_type="quotes",
+        symbols="OPTIONS",
+        start_date="2023-02-01",
+        end_date="2023-02-02",
+        data_dir=str(tmp_path),
+    )
+
+    assert len(out) == 2
+    assert all(path.exists() for path in out)
+    assert all(path.suffixes[-2:] == [".csv", ".gz"] for path in out)
+    assert len(captured_calls) == 2
+
+
+def test_download_raw_csv_gz_missing_dataset_does_not_leave_file(tmp_path, monkeypatch):
+    def fake_download(url: str, destination: Path, api_key: str | None):
+        response = requests.Response()
+        response.status_code = 404
+        raise requests.HTTPError("not found", response=response)
+
+    monkeypatch.setattr(dac, "_download_url_to_file", fake_download)
+
+    out = dac.download_raw_csv_gz(
+        exchange="deribit",
+        data_type="quotes",
+        symbols="OPTIONS",
+        start_date="2023-02-01",
+        end_date="2023-02-01",
+        data_dir=str(tmp_path),
+    )
+
+    assert len(out) == 1
+    assert not out[0].exists()

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$ROOT_DIR/venv"
+REQ_FILE="$ROOT_DIR/requirements.txt"
+
+# Argcomplete invokes the CLI frequently; skip expensive environment sync in that mode.
+if [[ -n "${_ARGCOMPLETE:-}" ]]; then
+  if [[ -x "$VENV_DIR/bin/python" ]]; then
+    exec "$VENV_DIR/bin/python" -m tardis.entry_point "$@"
+  elif command -v python3 >/dev/null 2>&1; then
+    exec env PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m tardis.entry_point "$@"
+  elif command -v python >/dev/null 2>&1; then
+    exec env PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" python -m tardis.entry_point "$@"
+  fi
+fi
+
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  elif command -v py >/dev/null 2>&1; then
+    PYTHON_BIN="py"
+  else
+    echo "No Python interpreter found. Tried: python, python3, py" >&2
+    exit 1
+  fi
+  "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+
+REQ_TMP="$(mktemp)"
+FREEZE_TMP="$(mktemp)"
+trap 'rm -f "$REQ_TMP" "$FREEZE_TMP"' EXIT
+
+grep -Ev '^[[:space:]]*(#|$)' "$REQ_FILE" | sed 's/[[:space:]]*$//' | sort -f > "$REQ_TMP"
+"$VENV_DIR/bin/python" -m pip freeze --disable-pip-version-check | sed 's/[[:space:]]*$//' | sort -f > "$FREEZE_TMP"
+
+if ! cmp -s "$REQ_TMP" "$FREEZE_TMP"; then
+  "$VENV_DIR/bin/python" -m pip install --upgrade pip
+  "$VENV_DIR/bin/python" -m pip install -r "$REQ_FILE"
+fi
+
+exec "$VENV_DIR/bin/python" -m tardis.entry_point "$@"

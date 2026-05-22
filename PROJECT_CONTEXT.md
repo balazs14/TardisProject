@@ -55,12 +55,13 @@ TardisProject is a Python 3.12 codebase for crypto market data workflows, focuse
 - Aggregation defaults:
   - Explicit per-column rules in `RESAMPLE_AGGREGATION_BY_COLUMN`.
   - Fallback rule: columns containing `amount` are summed; others take last value.
+- python files should have spaces not tabs, and functions should be around one screen in length for readability.
 
 ## Known project shape
 
 - Mixed style workspace:
-  - Package code under `TardisProject/`
-  - Standalone scripts at root (e.g., `deribit.py`, `okex.py`).
+  - Package code under `tardis/`
+  - Standalone scripts at root (e.g., `generic_loop.sh`, 'tardisctl').
   - Historical/experimental scripts under `attic/`.
 - This suggests production and exploratory workflows coexist in one repository.
 

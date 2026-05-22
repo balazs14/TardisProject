@@ -353,6 +353,74 @@ def _is_missing_dataset_http_error(exc: requests.HTTPError) -> bool:
     return exc.response.status_code in {400, 404}
 
 
+def _download_url_to_file(url: str, destination: Path, api_key: str | None) -> None:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    with requests.get(url, headers=headers, stream=True, timeout=120) as response:
+        response.raise_for_status()
+        with destination.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+
+def download_raw_csv_gz(
+    exchange: str,
+    data_type: str,
+    symbols,
+    start_date: str,
+    end_date: str | None = None,
+    data_dir: str | None = None,
+    force_reload: bool = False,
+) -> List[Path]:
+    """Download raw Tardis .csv.gz files without any conversion or resampling."""
+    end_date = end_date or start_date
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date).date()
+    if end < start:
+        raise ValueError(f"end_date ({end_date}) must be >= start_date ({start_date})")
+
+    data_dir_path = Path(data_dir) if data_dir is not None else Path(f"datasets/{exchange}_raw")
+    data_dir_path.mkdir(parents=True, exist_ok=True)
+
+    api_key = os.environ.get("TARDIS_API_KEY", None)
+    symbol_list = _normalize_symbols_input(symbols)
+    raw_paths: list[Path] = []
+
+    if not symbol_list:
+        logger.warning("No valid symbols provided for raw download(exchange=%s, data_type=%s)", exchange, data_type)
+        return raw_paths
+
+    for symbol in symbol_list:
+        for day in pd.date_range(start, end, freq="1D"):
+            ds = str(day.date())
+            stem = f"{exchange}_{data_type}_{ds}_{symbol}"
+            csv_gz_path = data_dir_path / f"{stem}.csv.gz"
+            raw_paths.append(csv_gz_path)
+
+            if csv_gz_path.exists() and not force_reload:
+                logger.debug("Raw CSV already exists and force_reload=False, skipping: %s", csv_gz_path)
+                continue
+            if csv_gz_path.exists() and force_reload:
+                csv_gz_path.unlink(missing_ok=True)
+
+            url = _tardis_csv_url(exchange=exchange, data_type=data_type, day=day, symbol=symbol)
+            logger.info("Downloading raw csv.gz from %s", url)
+
+            try:
+                _download_url_to_file(url, csv_gz_path, api_key=api_key)
+            except requests.HTTPError as exc:
+                if _is_missing_dataset_http_error(exc):
+                    status = exc.response.status_code if exc.response is not None else "unknown"
+                    logger.warning("No dataset found for symbol=%s (%s) [HTTP %s]", symbol, url, status)
+                    csv_gz_path.unlink(missing_ok=True)
+                    continue
+                raise
+
+            logger.info("Finished raw download %s", csv_gz_path)
+
+    return raw_paths
+
+
 def download_resample(
     exchange: str,
     data_type: str,
@@ -556,6 +624,14 @@ def _aggregate_resample_default_chunk(df: pl.DataFrame, freq: str, tscol: str = 
         return df
     polars_freq = _normalize_polars_freq(freq)
     _, last_cols, summed_cols = _resample_column_sets(df.columns, tscol)
+    agg_exprs = [
+        *[pl.col(c).sort_by(tscol).last().alias(c) for c in last_cols],
+        *[pl.col(c).sum().alias(c) for c in summed_cols],
+    ]
+    if "bid_price" in df.columns:
+        agg_exprs.append(pl.col("bid_price").is_not_null().any().alias("_bid_updated"))
+    if "ask_price" in df.columns:
+        agg_exprs.append(pl.col("ask_price").is_not_null().any().alias("_ask_updated"))
 
     # Single-pass bucket aggregation: preserves last/sum semantics and computes
     # quote-update flags without an extra groupby+join.
@@ -563,14 +639,7 @@ def _aggregate_resample_default_chunk(df: pl.DataFrame, freq: str, tscol: str = 
     return (
         df.with_columns(pl.col(tscol).dt.truncate(polars_freq).alias("_bucket_ts"))
         .group_by(["symbol", "_bucket_ts"], maintain_order=True)
-        .agg(
-            [
-                *[pl.col(c).sort_by(tscol).last().alias(c) for c in last_cols],
-                *[pl.col(c).sum().alias(c) for c in summed_cols],
-                (pl.col("bid_price").is_not_null().any() if "bid_price" in df.columns else pl.lit(False)).alias("_bid_updated"),
-                (pl.col("ask_price").is_not_null().any() if "ask_price" in df.columns else pl.lit(False)).alias("_ask_updated"),
-            ]
-        )
+        .agg(agg_exprs)
         .rename({"_bucket_ts": tscol})
         .sort(["symbol", tscol])
     )
@@ -727,6 +796,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Download Tardis CSV data and convert it to parquet.",
         formatter_class=_CliHelpFormatter,
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--exchange",
@@ -794,6 +864,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=True,
         help="Display --peek preview transposed so all columns are visible",
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Download and save raw .csv.gz files only (no resample/parquet conversion)",
+    )
     return parser
 
 
@@ -821,7 +896,7 @@ def run_cli_args(args: argparse.Namespace) -> None:
         "Parsed CLI args: exchange=%s data_type=%s symbol=%s"
         " start_date=%s end_date=%s data_dir=%s force_reload=%s"
         " resample_freq=%s loglevel=%s"
-        " peek=%s peek_rows=%s peek_transposed=%s",
+        " peek=%s peek_rows=%s peek_transposed=%s raw=%s",
         args.exchange,
         args.data_type,
         args.symbol,
@@ -834,6 +909,7 @@ def run_cli_args(args: argparse.Namespace) -> None:
         args.peek,
         args.peek_rows,
         args.peek_transposed,
+        args.raw,
     )
 
     if args.peek:
@@ -846,6 +922,20 @@ def run_cli_args(args: argparse.Namespace) -> None:
             head_rows=args.peek_rows,
             transpose_preview=args.peek_transposed,
         )
+        return
+
+    if args.raw:
+        paths = download_raw_csv_gz(
+            exchange=args.exchange,
+            data_type=args.data_type,
+            symbols=args.symbol,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            data_dir=args.data_dir,
+            force_reload=args.force_reload,
+        )
+        for path in paths:
+            logger.debug(path)
         return
     
     paths = download_resample(

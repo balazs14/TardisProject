@@ -418,9 +418,30 @@ def mark_up(
     When `data_type` is provided, markup is applied to rows matching the
     selected exchange and data_type. If symbol_type is provided, dispatch is
     performed on (exchange, data_type, symbol_type).
+
+    When `df` is empty (e.g. spot data not available for the day), a one-row
+    null dummy frame is created and returned so that callers can proceed with
+    left-joins that simply produce null spot columns.  The derivative_ticker
+    data type is excluded from this behaviour because its markup expressions
+    reference data columns (mark_price) that cannot be synthesised.
     """
     if df.is_empty():
-        return df
+        if data_type == "derivative_ticker":
+            return df
+        logger.warning(
+            "mark_up received empty dataframe (exchange=%s data_type=%s); creating null dummy row",
+            exchange,
+            data_type,
+        )
+        df = pl.DataFrame({
+            "timestamp": pl.Series([None], dtype=pl.Datetime("us")),
+            "symbol": pl.Series([None], dtype=pl.String),
+            "bid_price": pl.Series([None], dtype=pl.Float64),
+            "ask_price": pl.Series([None], dtype=pl.Float64),
+            "bid_amount": pl.Series([None], dtype=pl.Float64),
+            "ask_amount": pl.Series([None], dtype=pl.Float64),
+            "stale": pl.Series([None], dtype=pl.Boolean),
+        })
     if "symbol" not in df.columns:
         logger.warning("mark_up received dataframe without symbol column")
         return df
