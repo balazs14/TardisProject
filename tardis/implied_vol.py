@@ -272,9 +272,9 @@ else:
 def _ensure_tte_column(df: pl.DataFrame) -> pl.DataFrame:
     if "tte" in df.columns:
         return df
-    if "exp" in df.columns and "ts" in df.columns:
-        return df.with_columns(((pl.col("exp") - pl.col("ts")) / pl.duration(days=365)).alias("tte"))
-    raise ValueError("Input needs either 'tte' or both 'exp' and 'ts' columns")
+    if "exp" in df.columns and "timestamp" in df.columns:
+        return df.with_columns(((pl.col("exp") - pl.col("timestamp")) / pl.duration(days=365)).alias("tte"))
+    raise ValueError("Input needs either 'tte' or both 'exp' and 'timestamp' columns")
 
 
 def _select_price_columns(df: pl.DataFrame, requested: Iterable[str] | None = None) -> list[str]:
@@ -317,7 +317,7 @@ def compute_black_implied_vols(
     strike_col
         Strike column name.
     tte_col
-        Time-to-expiry in years column. If absent, attempts to compute from exp-ts.
+        Time-to-expiry in years column. If absent, attempts to compute from exp-timestamp.
     output_suffix
         Added to each price column name for IV outputs. Ignored when output_columns is given.
     output_columns

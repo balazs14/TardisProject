@@ -11,7 +11,7 @@ def sample_aligned_df_pandas():
     df = tu.df_from_string(
         '''
 name  value
-ts              2026-01-01
+timestamp       2026-01-01
 exp             2027-01-01
 fut_exp         2027-01-01T00:00:00
 spot_ask_price                101.0
@@ -27,7 +27,7 @@ strike                        100.0
     ).set_index("name")
 
     df = df.T
-    for c in ["ts", "exp", "fut_exp"]:
+    for c in ["timestamp", "exp", "fut_exp"]:
         df[c] = pd.to_datetime(df[c])
 
     float_cols = (
@@ -50,7 +50,7 @@ def expected_snapshot_string():
     return '''                                     value
 name
 
-ts                     2026-01-01 00:00:00
+timestamp              2026-01-01 00:00:00
 exp                    2027-01-01 00:00:00
 fut_exp                2027-01-01 00:00:00
 spot_ask_price                       101.0

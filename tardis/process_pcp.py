@@ -1,6 +1,7 @@
 import logging
 import glob
 from datetime import timedelta, datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,29 @@ from tardis.implied_vol import compute_black_implied_vols
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel('ERROR')
+
+
+def _subsample_on_time_grid(df, subsample_freq):
+    """Keep rows only on timestamps aligned to the requested interval."""
+    if "timestamp" not in df.columns:
+        raise ValueError("Input frame must include 'timestamp' for subsampling")
+
+    rows_in = df.height
+    out = df.filter(pl.col("timestamp") == pl.col("timestamp").dt.truncate(subsample_freq))
+    logger.debug(
+        "subsample_on_time_grid every=%s rows_in=%d rows_out=%d",
+        subsample_freq,
+        rows_in,
+        out.height,
+    )
+    return out
+
+def _as_absolute_path(path_value, arg_name):
+    """Validate user-provided path-like values are absolute and return Path."""
+    path = Path(path_value)
+    if not path.is_absolute():
+        raise ValueError(f"{arg_name} must be an absolute path, got: {path_value}")
+    return path
 
 def compute_pcp_metrics(
     aligned_df,
@@ -27,6 +50,10 @@ def compute_pcp_metrics(
     """Compute put-call parity metrics from aligned call/put/future/spot legs."""
     pandas_interface = isinstance(aligned_df, pd.DataFrame)
     input_rows = len(aligned_df)
+    
+    # the following assumes that the input dataframe has only inverse options. (both deribit and okex so far).
+    # therefore the prices are quoted in coin, and the amounts are also in coin. 
+
     logger.debug(
         "compute_pcp_metrics start rows=%d pandas_interface=%s contract_size=%s cost_per_notional=%s",
         input_rows,
@@ -36,11 +63,13 @@ def compute_pcp_metrics(
     )
     df = pl.from_pandas(aligned_df) if pandas_interface else aligned_df
 
-    df = df.filter(pl.col("fut_exp").is_not_null())
+    expiry_col = "fut_exp" if "fut_exp" in df.columns else "exp"
+    df = df.filter(pl.col(expiry_col).is_not_null())
     logger.debug(
-        "compute_pcp_metrics filtered_exp rows_in=%d rows_kept=%d",
+        "compute_pcp_metrics filtered_exp rows_in=%d rows_kept=%d expiry_col=%s",
         input_rows,
         df.height,
+        expiry_col,
     )
 
     index = (pl.col("spot_ask_price") + pl.col("spot_bid_price")) / 2
@@ -49,7 +78,7 @@ def compute_pcp_metrics(
     put_ask_xs = pl.col("put_ask_price") * pl.col("spot_ask_price")
     put_bid_xs = pl.col("put_bid_price") * pl.col("spot_bid_price")
 
-    tte = (pl.col("exp") - pl.col("ts")) / pl.duration(days=365)
+    tte = (pl.col("exp") - pl.col("timestamp")) / pl.duration(days=365)
     dscnt = (-(r) * tte).exp()
 
     pcpb_forward = (call_bid_xs - put_ask_xs - (pl.col("fut_ask_price") - pl.col("strike")) * dscnt) * contract_size
@@ -92,10 +121,17 @@ def compute_pcp_metrics(
             (pl.min_horizontal(((put_ask_xs - put_bid_xs) / index) * 10000, ((call_ask_xs - call_bid_xs) / index) * 10000)).alias("smaller_opt_spread_bp"),
             (((pcpb_forward - cost) / (contract_size * index)) * 10000).alias("amu_fwd_bp"),
             (((pcpb_backward - cost) / (contract_size * index)) * 10000).alias("amu_bck_bp"),
+            (pl.min_horizontal(
+                pl.col("call_bid_amount"),
+                pl.col("call_ask_amount"),
+                pl.col("put_bid_amount"),
+                pl.col("put_ask_amount"),
+            ) * index).alias("min_quote_size_dollar"),
             pl.lit(contract_size).alias("contract_size"),
             (0.5 * pl.col("fut_bid_price") + 0.5 * pl.col("fut_ask_price")).alias("fut_mid_price"),
             (pl.col("strike") / (0.5 * pl.col("fut_bid_price") + 0.5 * pl.col("fut_ask_price"))).alias("rel_strike"),
-            pl.col("ts").dt.date().alias("mdy"),
+            pl.col("timestamp").dt.date().alias("mdy"),
+        
         ]
     )
 
@@ -105,9 +141,22 @@ def compute_pcp_metrics(
 
 
 def compact(from_date, to_date, exchanges, ref_syms, freq="5min", output_path=None,
+            data_root=None,
             rel_strike_min=0.0, rel_strike_max=100,
-            cols_needed=None
+            cols_needed=None,
+            compute_implied_vols=False,
+            subsample_freq=None,
         ):
+    """Build a compact parquet by scanning aligned daily files under an absolute dataset root.
+
+    Args:
+        output_path: Absolute output parquet path. If omitted, an absolute path under
+            ``data_root`` is used.
+        data_root: Absolute path to datasets root that contains exchange folders.
+            Defaults to ``<repo>/datasets`` resolved from this module location.
+        subsample_freq: Optional interval (for example, ``"1h"`` or ``"1hr"``)
+            used to keep only timestamps aligned to that grid.
+    """
 
     if not isinstance(exchanges, (list, tuple)):
         exchanges = [exchanges]
@@ -120,31 +169,59 @@ def compact(from_date, to_date, exchanges, ref_syms, freq="5min", output_path=No
     day_strs = [d.strftime("%Y-%m-%d") for d in days]
     logger.info(f'potentially {len(day_strs)} days')
 
-    if output_path is None:
-        output_path = f"datasets/compact_options_{from_date}_{to_date}_{freq}.parquet"
+    if data_root is None:
+        # Use repo-level datasets directory independent of current working directory.
+        data_root = Path(__file__).resolve().parents[1] / "datasets"
+    else:
+        data_root = _as_absolute_path(data_root, "data_root")
 
+    if output_path is None:
+        output_path = data_root / f"compact_options_{from_date}_{to_date}_{freq}.parquet"
+    else:
+        output_path = _as_absolute_path(output_path, "output_path")
+
+    data_root = str(data_root)
+    output_path = str(output_path)
+    
     writer = None
     total_rows = 0
     try:
         for ex in exchanges:
             files = []
             for day in day_strs:
-                pattern = f"datasets/{ex}/{ex}_aligned_options_{day}_{freq}.parquet"
+                pattern = str(Path(data_root) / ex / f"{ex}_aligned_options_{day}_{freq}.parquet")
                 files.extend(glob.glob(pattern))
             logger.info(f'found {len(files)} files for {ex}')
             for f in files:
+                logger.debug("compact processing file=%s", f)
+                if Path(f).stat().st_size == 0:
+                    logger.warning("Skipping empty parquet file: %s", f)
+                    continue
                 raw = pl.read_parquet(f)
+                logger.info("compact input file=%s rows=%d", f, len(raw))
+
+                if subsample_freq:
+                    raw = _subsample_on_time_grid(raw, subsample_freq)
+                    if raw.height == 0:
+                        logger.debug(
+                            "compact skipping file=%s after subsample_freq=%s because no rows remain",
+                            f,
+                            subsample_freq,
+                        )
+                        continue
 
                 # pcp
                 df_with_pcp = compute_pcp_metrics(raw)
 
-                # implied vol
-                df = compute_black_implied_vols(
-                        df_with_pcp,
-                        r=0.05,
-                        price_columns=["call_bid_price", "call_ask_price", "put_bid_price", "put_ask_price"],
-                        output_columns=["call_bid_iv", "call_ask_iv", "put_bid_iv", "put_ask_iv"],
-                    )
+                if compute_implied_vols:
+                    df = compute_black_implied_vols(
+                            df_with_pcp,
+                            r=0.05,
+                            price_columns=["call_bid_price", "call_ask_price", "put_bid_price", "put_ask_price"],
+                            output_columns=["call_bid_iv", "call_ask_iv", "put_bid_iv", "put_ask_iv"],
+                        )
+                else:
+                    df = df_with_pcp
 
                 # Keep rows near-the-money only.
                 rel_strike_ok = (
