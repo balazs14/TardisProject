@@ -25,3 +25,5 @@ tardis/lib/okex-options_quotes_2025-11-01_OPTIONS.parquet
 tmp
 tmp.parquet
 .pytest_cache/
+__pycache__/
+.ipynb_checkpoints/
