@@ -163,7 +163,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
 def run_cli_args(args: argparse.Namespace) -> None:
         logger.debug(
-                "Parsed align-put-call args: exchange=%s date=%s sample_freq=%s recreate_existing=%s raw_data_dir=%s output=%s",
+                "Parsed align-put-call-data args: exchange=%s date=%s sample_freq=%s recreate_existing=%s raw_data_dir=%s output=%s",
                 args.exchange,
                 args.date,
                 args.sample_freq,

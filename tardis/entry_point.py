@@ -106,7 +106,7 @@ def _add_download_subparser(sub: argparse._SubParsersAction) -> None:
 
 def _add_align_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
-        "align-put-call",
+        "align-put-call-data",
         help="Build aligned call/put/future/spot data",
         description="Run tardis.align_put_call_data alignment pipeline.",
         formatter_class=_CliHelpFormatter,
@@ -374,7 +374,7 @@ def run_cli(argv: list[str] | None = None) -> None:
     if args.cmd == "download-files":
         download_files.run_cli_args(args)
         return
-    if args.cmd == "align-put-call":
+    if args.cmd == "align-put-call-data":
         align_put_call_data.run_cli_args(args)
         return
     if args.cmd == "align-option-chain-trades-quotes":
