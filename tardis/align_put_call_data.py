@@ -80,11 +80,12 @@ def align_data(
         prefixed bid/ask/amount/stale columns.
         """
         assert "stale" in df_opt.columns, "df_opt must have a stale column"
-        assert "stale" in df_fut.columns, "df_fut must have a stale column"
         assert "stale" in df_spot.columns, "df_spot must have a stale column"
 
         call_put_keys = ["timestamp", "exp", "strike", "exchange", "inverse", "fut_sym", "ref_sym", "spot_sym"]
         opt_val_cols = ["bid_price", "ask_price", "bid_amount", "ask_amount", "stale"]
+        # Futures are assumed liquid; stale not required and not carried forward.
+        fut_val_cols = ["bid_price", "ask_price", "bid_amount", "ask_amount"]
         leg_val_cols = ["bid_price", "ask_price", "bid_amount", "ask_amount", "stale"]
 
         # ── calls ────────────────────────────────────────────────────────────────
@@ -109,8 +110,8 @@ def align_data(
         # ── futures — inner join on (timestamp, fut_sym) ──────────────────────────
         df_fut_sel = (
                 df_fut
-                .select(["timestamp", "symbol"] + leg_val_cols)
-                .rename({"symbol": "fut_sym", **{c: f"fut_{c}" for c in leg_val_cols}})
+                .select(["timestamp", "symbol"] + fut_val_cols)
+                .rename({"symbol": "fut_sym", **{c: f"fut_{c}" for c in fut_val_cols}})
         )
         df = df.join(df_fut_sel, on=["timestamp", "fut_sym"], how="inner")
 

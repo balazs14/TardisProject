@@ -9,6 +9,7 @@ from tardis import _CliHelpFormatter
 from tardis import align_derivative_ticker_trades_quotes
 from tardis import align_option_chain_trades_quotes
 from tardis import align_put_call_data
+from tardis import align_put_call_quotes_trades_chain
 from tardis import download_files
 from tardis import tardis_universe
 
@@ -220,6 +221,44 @@ def _add_align_derivative_ticker_subparser(sub: argparse._SubParsersAction) -> N
     )
 
 
+def _add_align_put_call_quotes_trades_chain_subparser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "align-put-call-quotes-trades-chain",
+        help="Build aligned put/call/future/spot quotes + option trades + open interest",
+        description="Run tardis.align_put_call_quotes_trades_chain alignment pipeline.",
+        formatter_class=_CliHelpFormatter,
+        allow_abbrev=False,
+    )
+    _add_loglevel_arg(p)
+    p.add_argument("--exchange", required=True, choices=["okex", "deribit"], help="Exchange to process")
+    p.add_argument("--date", required=True, help="Date in YYYY-MM-DD format")
+    p.add_argument("--sample-freq", default="5min", help="Sampling frequency label for output naming")
+    recreate_group = p.add_mutually_exclusive_group()
+    recreate_group.add_argument(
+        "--recreate-existing",
+        dest="recreate_existing",
+        action="store_true",
+        help="Recreate output parquet even when it already exists.",
+    )
+    recreate_group.add_argument(
+        "--no-recreate-existing",
+        dest="recreate_existing",
+        action="store_false",
+        help="Skip processing when the output parquet path already exists (default).",
+    )
+    p.set_defaults(recreate_existing=False)
+    p.add_argument(
+        "--raw-data-dir",
+        default="datasets/{exchange}_raw/",
+        help="Directory for download_resample parquet outputs",
+    )
+    p.add_argument(
+        "--output",
+        default=None,
+        help="Output parquet path. Derived from exchange/date/sample-freq when omitted.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tardisctl",
@@ -235,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_align_subparser(sub)
     _add_align_option_chain_subparser(sub)
     _add_align_derivative_ticker_subparser(sub)
+    _add_align_put_call_quotes_trades_chain_subparser(sub)
     return parser
 
 
@@ -382,6 +422,9 @@ def run_cli(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "align-derivative-ticker-trades-quotes":
         align_derivative_ticker_trades_quotes.run_cli_args(args)
+        return
+    if args.cmd == "align-put-call-quotes-trades-chain":
+        align_put_call_quotes_trades_chain.run_cli_args(args)
         return
 
     parser.print_help()

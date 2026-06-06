@@ -25,7 +25,7 @@ def _okex_options_quotes_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr], t
     Pattern: CUR1-CUR2-YYMMDD-STRIKE-PC
     Example: ETH-USD-260529-1600-P
     """
-    pattern = r"^[A-Z0-9]+-[A-Z0-9]+-\d{6}-\d+(?:\.\d+)?-[CP]$"
+    pattern = r"^[A-Z0-9]+-[A-Z0-9_]+-\d{6}-\d+(?:\.\d+)?-[CP]$"
     symbol_col = pl.col("symbol").cast(pl.String)
     if not df.select(symbol_col.str.contains(pattern).all()).item():
         invalid_symbols = (
@@ -80,7 +80,7 @@ def _okex_futures_quotes_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr], t
     Pattern: CUR1-CUR2-YYMMDD
     Example: BTC-USD-260925
     """
-    assert df.select(pl.col("symbol").cast(pl.String).str.contains(r"^[A-Z0-9]+-[A-Z0-9]+-\d{6}$").all()).item(), \
+    assert df.select(pl.col("symbol").cast(pl.String).str.contains(r"^[A-Z0-9]+-[A-Z0-9_]+-\d{6}$").all()).item(), \
         "okex-futures future pattern expected: ETH-USDT-240613"
     
     markup_columns = ("CUR1", "CUR2", "exp", "exp_str", "ref_sym", "spot_sym", "inverse")
