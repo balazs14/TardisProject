@@ -18,6 +18,21 @@ from tardis.utils import _configure_logging
 
 logger = logging.getLogger(__name__)
 
+
+def _expand_days(days, from_date=None, to_date=None):
+    if days is not None:
+        if isinstance(days, (list, tuple)):
+            return list(days)
+        return [days]
+
+    assert from_date is not None, "from_date is required when days is not provided"
+    assert to_date is not None, "to_date is required when days is not provided"
+
+    start = pd.Timestamp(from_date).date()
+    end = pd.Timestamp(to_date).date()
+    assert start <= end, f"from_date must be on or before to_date: {from_date} -> {to_date}"
+    return [(start + timedelta(days=offset)).isoformat() for offset in range((end - start).days + 1)]
+
 def one_day(day, exchange, config: SampleConfig, align_only=True):
     day_str = f'{pd.Timestamp(day).date()}'
     logger.info("one_day start exchange=%s day=%s freq=%s", exchange, day_str, config.freq)
@@ -119,7 +134,10 @@ def _parse_bool(value):
 def build_cli_parser() -> argparse.ArgumentParser:
     from tardis import _CliHelpFormatter
     parser = argparse.ArgumentParser(description="Run Tardis PCP pipeline for given days/exchanges", formatter_class=_CliHelpFormatter)
-    parser.add_argument("--days", required=True, help="Single day or comma-separated days (YYYY-MM-DD)")
+    day_group = parser.add_mutually_exclusive_group(required=True)
+    day_group.add_argument("--days", help="Single day or comma-separated days (YYYY-MM-DD)")
+    day_group.add_argument("--from-date", dest="from_date", help="Inclusive start date (YYYY-MM-DD)")
+    parser.add_argument("--to-date", dest="to_date", help="Inclusive end date (YYYY-MM-DD). Required with --from-date.")
     parser.add_argument("--exchanges", required=True, help="Single exchange or comma-separated exchanges")
     parser.add_argument("--loglevel", default="ERROR", help="Logging level")
     parser.add_argument("--freq", default="5min", help="Resampling frequency")
@@ -131,7 +149,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
 
 def run_cli_args(args: argparse.Namespace):
-    days = _split_csv_or_scalar(args.days)
+    days = _split_csv_or_scalar(args.days) if args.days else _expand_days(None, args.from_date, args.to_date)
     exchanges = _split_csv_or_scalar(args.exchanges)
     _configure_logging(args.loglevel)
 
