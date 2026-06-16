@@ -155,7 +155,7 @@ def test_mark_up_deribit_trades_future_parses_usd_fallback_and_usdc_root():
     assert out.get_column("exp_str").to_list() == ["27MAR26", "27MAR26"]
     assert out.get_column("ref_sym").to_list() == ["ETHUSD", "ETHUSD"]
     assert out.get_column("spot_sym").to_list() == ["ETH-USDC", "ETH-USD"]
-    assert out.get_column("inverse").to_list() == [True, True]
+    assert out.get_column("inverse").to_list() == [False, True]
 
 
 def test_mark_up_deribit_trades_spot_matches_okex_spot_trades_columns():
@@ -190,7 +190,7 @@ def test_mark_up_deribit_trades_option_parses_d_strike_and_defaults_cur2():
     assert out.get_column("ref_sym").to_list() == ["XRPUSD"]
     assert out.get_column("fut_sym").to_list() == ["XRP_USDC-2MAR26"]
     assert out.get_column("spot_sym").to_list() == ["XRP_USDC"]
-    assert out.get_column("inverse").to_list() == [True]
+    assert out.get_column("inverse").to_list() == [False]
     assert out.get_column("strike").to_list() == [1.375]
     assert out.get_column("pc").to_list() == ["P"]
     assert out.get_column("type").to_list() == ["option"]
@@ -214,7 +214,7 @@ def test_mark_up_deribit_quotes_future_parses_usd_fallback_and_usdc_root():
     assert out.get_column("exp_str").to_list() == ["27MAR26", "27MAR26"]
     assert out.get_column("ref_sym").to_list() == ["ETHUSD", "ETHUSD"]
     assert out.get_column("spot_sym").to_list() == ["ETH-USDC", "ETH-USD"]
-    assert out.get_column("inverse").to_list() == [True, True]
+    assert out.get_column("inverse").to_list() == [False, True]
 
 
 def test_mark_up_deribit_quotes_future_ref_sym_uses_cur1cur2_for_non_usd_prefix():
@@ -245,7 +245,7 @@ def test_mark_up_deribit_trades_future_ref_sym_uses_cur1cur2_for_non_usd_prefix(
     assert out.get_column("CUR1").to_list() == ["ETH"]
     assert out.get_column("CUR2").to_list() == ["BTC"]
     assert out.get_column("ref_sym").to_list() == ["ETHBTC"]
-    assert out.get_column("inverse").to_list() == [True]
+    assert out.get_column("inverse").to_list() == [False]
 
 
 def test_mark_up_deribit_derivative_ticker_future_sets_mark_price_to_bid_ask():
@@ -307,7 +307,7 @@ def test_mark_up_deribit_quotes_option_parses_d_strike_and_defaults_cur2():
     assert out.get_column("ref_sym").to_list() == ["XRPUSD", "ETHUSD"]
     assert out.get_column("fut_sym").to_list() == ["XRP_USDC-2MAR26", "ETH-27MAR26"]
     assert out.get_column("spot_sym").to_list() == ["XRP_USDC", "ETH_USDC"]
-    assert out.get_column("inverse").to_list() == [True, True]
+    assert out.get_column("inverse").to_list() == [False, True]
 
 
 def test_mark_up_deribit_quotes_option_parses_integer_strike_tokens():
@@ -343,7 +343,7 @@ def test_mark_up_deribit_quotes_option_ref_sym_uses_cur1cur2_for_non_usd_prefix(
     assert out.get_column("CUR1").to_list() == ["XRP"]
     assert out.get_column("CUR2").to_list() == ["BTC"]
     assert out.get_column("ref_sym").to_list() == ["XRPBTC"]
-    assert out.get_column("inverse").to_list() == [True]
+    assert out.get_column("inverse").to_list() == [False]
 
 
 def test_mark_up_deribit_trades_option_ref_sym_uses_cur1cur2_for_non_usd_prefix():
@@ -360,7 +360,7 @@ def test_mark_up_deribit_trades_option_ref_sym_uses_cur1cur2_for_non_usd_prefix(
     assert out.get_column("CUR1").to_list() == ["XRP"]
     assert out.get_column("CUR2").to_list() == ["BTC"]
     assert out.get_column("ref_sym").to_list() == ["XRPBTC"]
-    assert out.get_column("inverse").to_list() == [True]
+    assert out.get_column("inverse").to_list() == [False]
 
 
 def test_mark_up_deribit_quotes_spot_matches_okex_shape():
@@ -411,12 +411,13 @@ def test_mark_up_deribit_trades_spot_ref_sym_uses_cur1cur2_for_non_usd_prefix():
     assert out.get_column("spot_sym").to_list() == ["ETH_BTC"]
 
 
-def test_mark_up_returns_empty_input_unchanged():
+def test_mark_up_empty_quotes_returns_dummy_row_for_safe_left_joins():
     df = pl.DataFrame(schema={"symbol": pl.String, "timestamp": pl.Int64})
 
     out = mf.mark_up(df, exchange="deribit", data_type="quotes")
 
-    assert out.is_empty()
+    assert out.height == 1
+    assert out.get_column("symbol").to_list() == [None]
 
 
 def test_mark_up_uses_unique_exchange_from_dataframe_when_exchange_is_none(caplog):

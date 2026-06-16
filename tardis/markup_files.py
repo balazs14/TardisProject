@@ -4,6 +4,7 @@ from pathlib import Path
 import polars as pl
 
 from tardis.download_files import download_resample
+from tardis import test_utils as tu
 
 
 logger = logging.getLogger(__name__)
@@ -202,7 +203,7 @@ def _deribit_quotes_options_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr]
         .when(cur1.is_in(["BTC", "ETH"]))
         .then(pl.concat_str([cur1, pl.lit("_USDC")]))
         .otherwise(cur1),
-        "inverse": pl.lit(True),
+        "inverse": cur2.str.to_uppercase() == pl.lit("USD"),
     }
     return expr_map, markup_columns
 
@@ -243,7 +244,7 @@ def _deribit_quotes_futures_markup(df: pl.DataFrame) -> tuple[dict[str, pl.Expr]
         "exp_str": exp_str,
         "ref_sym": pl.when(cur2.str.to_uppercase().str.starts_with("USD")).then(pl.concat_str([cur1, pl.lit("USD")])).otherwise(pl.concat_str([cur1, cur2])),
         "spot_sym": pl.concat_str([cur1, pl.lit("-"), cur2]),
-        "inverse": pl.lit(True),
+        "inverse": cur2.str.to_uppercase() == pl.lit("USD"),
     }
     return expr_map, markup_columns
 
@@ -292,7 +293,7 @@ def _deribit_derivative_ticker_future_markup(df: pl.DataFrame) -> tuple[dict[str
         "exp_str": exp_str,
         "ref_sym": pl.when(cur2.str.to_uppercase().str.starts_with("USD")).then(pl.concat_str([cur1, pl.lit("USD")])).otherwise(pl.concat_str([cur1, cur2])),
         "spot_sym": pl.concat_str([cur1, pl.lit("-"), cur2]),
-        "inverse": pl.lit(True),
+        "inverse": cur2.str.to_uppercase() == pl.lit("USD"),
         "bid_price": pl.col("mark_price"),
         "ask_price": pl.col("mark_price"),
         "bid_amount": pl.lit(None, dtype=pl.Float64),
@@ -517,3 +518,50 @@ def access_files(
     if not frames:
         return pl.DataFrame(), unique_symbols
     return pl.concat(frames, rechunk=False), unique_symbols
+
+
+def test_mark_up_deribit_option_inverse_flag_snapshot() -> None:
+    df = pl.DataFrame(
+        {
+            "symbol": ["BTC-31OCT25-80000-C", "BTC_USDC-31OCT25-80000-C"],
+            "timestamp": [None, None],
+            "bid_price": [None, None],
+            "ask_price": [None, None],
+            "bid_amount": [None, None],
+            "ask_amount": [None, None],
+            "stale": [None, None],
+        }
+    )
+    out = mark_up(df, exchange="deribit", data_type="quotes", symbol_type="option")
+    snap = out.select(["symbol", "CUR1", "CUR2", "ref_sym", "spot_sym", "inverse"]).to_pandas()
+    tu.assert_df_equal(
+        snap,
+        """
+                   symbol CUR1  CUR2 ref_sym  spot_sym  inverse
+0      BTC-31OCT25-80000-C  BTC   USD  BTCUSD  BTC_USDC     True
+1  BTC_USDC-31OCT25-80000-C  BTC  USDC  BTCUSD  BTC_USDC    False
+""",
+    )
+
+
+def test_mark_up_okex_option_snapshot() -> None:
+    df = pl.DataFrame(
+        {
+            "symbol": ["BTC-USD-260925-80000-C"],
+            "timestamp": [None],
+            "bid_price": [None],
+            "ask_price": [None],
+            "bid_amount": [None],
+            "ask_amount": [None],
+            "stale": [None],
+        }
+    )
+    out = mark_up(df, exchange="okex-options", data_type="quotes")
+    snap = out.select(["symbol", "ref_sym", "fut_sym", "spot_sym", "inverse"]).to_pandas()
+    tu.assert_df_equal(
+        snap,
+        """
+                   symbol ref_sym           fut_sym spot_sym  inverse
+0  BTC-USD-260925-80000-C  BTCUSD  BTC-USDT-260925  BTC-USDT    False
+""",
+    )

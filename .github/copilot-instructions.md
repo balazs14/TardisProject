@@ -64,6 +64,8 @@ Reference implementations:
 - Column selection/mapping should be driven by explicit dictionaries in the shape:
   - `output_col: (source_alias, source_column)`
 - Keep utilities assertive: assume known schemas for normal operation; use `assert` plus logging for invalid input instead of generic defensive boilerplate.
+- For LaTeX builds (especially publications/AMU), always keep intermediates in `build/` via `latexmk -outdir=build` to avoid mixed artifact states between source and output directories.
+- For clean LaTeX rebuilds, prefer `latexmk -C && rm -rf build` followed by the same `latexmk ... -outdir=build` command.
 
 ## Repo-wide coding style rules
 

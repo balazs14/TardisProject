@@ -89,6 +89,7 @@ bigger_opt_spread_bp                  42.2
 smaller_opt_spread_bp                 28.3
 amu_fwd_bp                      -61.397114
 amu_bck_bp                      -70.054115
+min_quote_size_dollar                  NaN
 contract_size                         0.01
 fut_mid_price                      102.005
 rel_strike                        0.980344

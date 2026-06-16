@@ -11,6 +11,7 @@ import pyarrow.parquet as pq
 
 from tardis.download_files import TARDIS_COLUMN_TYPES
 from tardis.implied_vol import compute_black_implied_vols
+from tardis import test_utils as tu
 
 
 logger = logging.getLogger(__name__)
@@ -51,8 +52,9 @@ def compute_pcp_metrics(
     pandas_interface = isinstance(aligned_df, pd.DataFrame)
     input_rows = len(aligned_df)
     
-    # the following assumes that the input dataframe has only inverse options. (both deribit and okex so far).
-    # therefore the prices are quoted in coin, and the amounts are also in coin. 
+    # Inverse instruments quote option premium in underlying coin, while linear
+    # instruments quote premium directly in quote currency. Apply spot conversion
+    # only for inverse rows.
 
     logger.debug(
         "compute_pcp_metrics start rows=%d pandas_interface=%s contract_size=%s cost_per_notional=%s",
@@ -72,17 +74,45 @@ def compute_pcp_metrics(
         expiry_col,
     )
 
+    if "timestamp" in df.columns and df.height > 0:
+        day_stats = df.select(
+            [
+                pl.col("timestamp").dt.date().min().alias("min_day"),
+                pl.col("timestamp").dt.date().max().alias("max_day"),
+                pl.col("timestamp").dt.date().n_unique().alias("n_days"),
+            ]
+        ).row(0)
+        logger.debug(
+            "compute_pcp_metrics date_window min_day=%s max_day=%s n_days=%s",
+            day_stats[0],
+            day_stats[1],
+            day_stats[2],
+        )
+    else:
+        logger.debug("compute_pcp_metrics date_window unavailable (missing timestamp or empty frame)")
+
+    inverse = pl.col("inverse") if "inverse" in df.columns else pl.lit(True)
+    if "call_symbol" in df.columns:
+        # Backward-compatible guard: older aligned Deribit files can carry a
+        # stale inverse=True flag for linear USDC option symbols.
+        is_linear_symbol = pl.col("call_symbol").cast(pl.String).str.contains(r"_[A-Z0-9]+-")
+        inverse = pl.when(is_linear_symbol).then(pl.lit(False)).otherwise(inverse)
     index = (pl.col("spot_ask_price") + pl.col("spot_bid_price")) / 2
-    call_ask_xs = pl.col("call_ask_price") * pl.col("spot_ask_price")
-    call_bid_xs = pl.col("call_bid_price") * pl.col("spot_bid_price")
-    put_ask_xs = pl.col("put_ask_price") * pl.col("spot_ask_price")
-    put_bid_xs = pl.col("put_bid_price") * pl.col("spot_bid_price")
+    call_ask_xs = pl.when(inverse).then(pl.col("call_ask_price") * pl.col("spot_ask_price")).otherwise(pl.col("call_ask_price"))
+    call_bid_xs = pl.when(inverse).then(pl.col("call_bid_price") * pl.col("spot_bid_price")).otherwise(pl.col("call_bid_price"))
+    put_ask_xs = pl.when(inverse).then(pl.col("put_ask_price") * pl.col("spot_ask_price")).otherwise(pl.col("put_ask_price"))
+    put_bid_xs = pl.when(inverse).then(pl.col("put_bid_price") * pl.col("spot_bid_price")).otherwise(pl.col("put_bid_price"))
 
     tte = (pl.col("exp") - pl.col("timestamp")) / pl.duration(days=365)
     dscnt = (-(r) * tte).exp()
 
     pcpb_forward = (call_bid_xs - put_ask_xs - (pl.col("fut_ask_price") - pl.col("strike")) * dscnt) * contract_size
     pcpb_backward = (call_ask_xs - put_bid_xs - (pl.col("fut_bid_price") - pl.col("strike")) * dscnt) * contract_size * -1
+
+    call_bid_amount = pl.col("call_bid_amount") if "call_bid_amount" in df.columns else pl.lit(None, dtype=pl.Float64)
+    call_ask_amount = pl.col("call_ask_amount") if "call_ask_amount" in df.columns else pl.lit(None, dtype=pl.Float64)
+    put_bid_amount = pl.col("put_bid_amount") if "put_bid_amount" in df.columns else pl.lit(None, dtype=pl.Float64)
+    put_ask_amount = pl.col("put_ask_amount") if "put_ask_amount" in df.columns else pl.lit(None, dtype=pl.Float64)
 
     cost = index.abs() * cost_per_notional * contract_size
     capital_fwd = (
@@ -122,10 +152,10 @@ def compute_pcp_metrics(
             (((pcpb_forward - cost) / (contract_size * index)) * 10000).alias("amu_fwd_bp"),
             (((pcpb_backward - cost) / (contract_size * index)) * 10000).alias("amu_bck_bp"),
             (pl.min_horizontal(
-                pl.col("call_bid_amount"),
-                pl.col("call_ask_amount"),
-                pl.col("put_bid_amount"),
-                pl.col("put_ask_amount"),
+                call_bid_amount,
+                call_ask_amount,
+                put_bid_amount,
+                put_ask_amount,
             ) * index).alias("min_quote_size_dollar"),
             pl.lit(contract_size).alias("contract_size"),
             (0.5 * pl.col("fut_bid_price") + 0.5 * pl.col("fut_ask_price")).alias("fut_mid_price"),
@@ -271,3 +301,91 @@ def compact(from_date, to_date, exchanges, ref_syms, freq="5min", output_path=No
         return None
     logger.info("compact wrote %d rows to %s", total_rows, output_path)
     return output_path
+
+
+def test_compute_pcp_metrics_inverse_linear_snapshot() -> None:
+    ts = datetime(2025, 10, 10, 0, 0, 0)
+    exp = datetime(2025, 10, 31, 0, 0, 0)
+    df = pl.DataFrame(
+        {
+            "timestamp": [ts, ts],
+            "exp": [exp, exp],
+            "inverse": [True, True],
+            "call_symbol": ["BTC-31OCT25-80000-C", "BTC_USDC-31OCT25-80000-C"],
+            "put_symbol": ["BTC-31OCT25-80000-P", "BTC_USDC-31OCT25-80000-P"],
+            "fut_sym": ["BTC-31OCT25", "BTC_USDC-31OCT25"],
+            "spot_sym": ["BTC_USDC", "BTC_USDC"],
+            "exchange": ["deribit", "deribit"],
+            "ref_sym": ["BTCUSD", "BTCUSD"],
+            "spot_bid_price": [100.0, 100.0],
+            "spot_ask_price": [100.0, 100.0],
+            "fut_bid_price": [105.0, 105.0],
+            "fut_ask_price": [105.0, 105.0],
+            "strike": [100.0, 100.0],
+            "call_bid_price": [0.10, 10.0],
+            "call_ask_price": [0.11, 11.0],
+            "put_bid_price": [0.09, 9.0],
+            "put_ask_price": [0.10, 10.0],
+            "call_bid_amount": [1.0, 1.0],
+            "call_ask_amount": [1.0, 1.0],
+            "put_bid_amount": [1.0, 1.0],
+            "put_ask_amount": [1.0, 1.0],
+        }
+    )
+
+    out = compute_pcp_metrics(df)
+    snap = out.select(
+        [
+            "call_symbol",
+            "inverse",
+            "call_bid_price",
+            "call_bid_price_xS",
+            "put_ask_price",
+            "put_ask_price_xS",
+            "pcpb_forward",
+            "amu_fwd_bp",
+        ]
+    ).to_pandas()
+    tu.assert_df_equal(
+        snap,
+        """
+               call_symbol  inverse  call_bid_price  call_bid_price_xS  put_ask_price  put_ask_price_xS  pcpb_forward  amu_fwd_bp
+0      BTC-31OCT25-80000-C     True             0.1               10.0            0.1              10.0      -0.049856  -528.563711
+1  BTC_USDC-31OCT25-80000-C     True            10.0               10.0           10.0              10.0      -0.049856  -528.563711
+""",
+    )
+
+
+def test_compute_pcp_metrics_linear_symbol_tail_sanity() -> None:
+    ts = datetime(2025, 10, 10, 0, 0, 0)
+    exp = datetime(2025, 10, 31, 0, 0, 0)
+    df = pl.DataFrame(
+        {
+            "timestamp": [ts],
+            "exp": [exp],
+            "inverse": [True],
+            "call_symbol": ["BTC_USDC-31OCT25-80000-C"],
+            "put_symbol": ["BTC_USDC-31OCT25-80000-P"],
+            "fut_sym": ["BTC_USDC-31OCT25"],
+            "spot_sym": ["BTC_USDC"],
+            "exchange": ["deribit"],
+            "ref_sym": ["BTCUSD"],
+            "spot_bid_price": [100.0],
+            "spot_ask_price": [100.0],
+            "fut_bid_price": [105.0],
+            "fut_ask_price": [105.0],
+            "strike": [100.0],
+            "call_bid_price": [10.0],
+            "call_ask_price": [11.0],
+            "put_bid_price": [9.0],
+            "put_ask_price": [10.0],
+            "call_bid_amount": [1.0],
+            "call_ask_amount": [1.0],
+            "put_bid_amount": [1.0],
+            "put_ask_amount": [1.0],
+        }
+    )
+
+    out = compute_pcp_metrics(df)
+    amu = float(out.select("amu_fwd_bp").item())
+    assert abs(amu) < 1000, f"Unexpected AMU scale for linear symbol row: {amu}"

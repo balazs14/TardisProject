@@ -58,6 +58,8 @@ def _rewrite_inline_snapshot(source_path, function_name, call_lineno, variable_n
 
     lines = source.splitlines(keepends=True)
     indent = re.match(r'\s*', lines[assign_node.lineno - 1]).group(0)
+    if not new_value.startswith('\n'):
+        new_value = '\n' + new_value
     escaped = new_value.replace('"""', '\\"""')
     replacement = f'{indent}{variable_name} = """{escaped}"""\n'
 
@@ -116,6 +118,8 @@ def _rewrite_assert_df_equal_inline_second_arg(source_path, function_name, call_
     start = _line_col_to_offset(lines, second_arg.lineno, second_arg.col_offset)
     end = _line_col_to_offset(lines, second_arg.end_lineno, second_arg.end_col_offset)
 
+    if not new_value.startswith('\n'):
+        new_value = '\n' + new_value
     escaped = new_value.replace('"""', '\\"""')
     replacement = f'"""{escaped}"""'
 
